@@ -8,6 +8,7 @@ from pathlib import Path
 from .template_manager import Template, FieldMapping, TableMapping
 from .pdf_processor import PDFProcessor
 from .document_manager import PDFDocument
+from .text_extractor import TextExtractor
 from .logger import get_logger, log_error_with_context
 from .exceptions import ExtractionError, CoordinateError, TemplateError
 
@@ -19,6 +20,7 @@ class ExtractionEngine:
     
     def __init__(self, pdf_processor: PDFProcessor):
         self.pdf_processor = pdf_processor
+        self.text_extractor = TextExtractor(pdf_processor)
     
     def extract_data(
         self,
@@ -336,39 +338,228 @@ class ExtractionEngine:
         table_data = []
         
         try:
-            # Hitta tabellområdet i texten
-            # Detta är en förenklad implementation
-            # En fullständig implementation skulle använda koordinater
+            # Hämta PDF-dimensioner för koordinatbaserad extraktion
+            pdf_dimensions = self.pdf_processor.get_pdf_dimensions(pdf_path)
+            if not pdf_dimensions:
+                logger.warning(f"Kunde inte hämta PDF-dimensioner för {pdf_path}")
+                pdf_dimensions = (612.0, 792.0)  # Default A4-storlek
             
-            # För nu, extrahera rader baserat på kolumnmappningar
-            start_line = 0
-            if table_mapping.has_header_row:
-                start_line = 1
+            pdf_width, pdf_height = pdf_dimensions
             
-            # Identifiera tabellrader (rader med flera kolumner)
-            table_lines = []
-            for line in lines:
-                # Kontrollera om raden ser ut som en tabellrad
-                parts = re.split(r'\s{2,}|\t', line.strip())
-                if len(parts) >= len(table_mapping.columns):
-                    table_lines.append(parts)
+            # Använd språk från template om tillgängligt
+            ocr_language = "swe+eng"  # Default
             
-            # Mappa kolumner
-            for row_parts in table_lines[start_line:]:
-                row_data = {}
-                for col_mapping in table_mapping.columns:
-                    col_index = col_mapping.get("index", 0)
-                    col_name = col_mapping.get("name", "")
-                    if col_index < len(row_parts):
-                        row_data[col_name] = row_parts[col_index].strip()
-                    else:
-                        row_data[col_name] = ""
+            # Kontrollera om vi har koordinatbaserad mappning
+            has_column_coords = any(
+                col_mapping.get("coords") for col_mapping in table_mapping.columns
+            )
+            has_row_coords = table_mapping.row_coords is not None and len(table_mapping.row_coords) > 0
+            
+            if has_column_coords and has_row_coords:
+                # Koordinatbaserad extraktion
+                return self._extract_table_with_coordinates(
+                    pdf_path, table_mapping, pdf_width, pdf_height, ocr_language
+                )
+            else:
+                # Fallback till textbaserad extraktion
+                return self._extract_table_from_text(lines, table_mapping)
+            
+        except CoordinateError:
+            # Propagera CoordinateError
+            raise
+        except Exception as e:
+            log_error_with_context(
+                logger, e,
+                {
+                    "table_name": table_mapping.table_name,
+                    "pdf_path": pdf_path,
+                    "columns": len(table_mapping.columns)
+                },
+                f"Oväntat fel vid extraktion av tabell"
+            )
+            # Returnera tom lista istället för att krascha - partial results
+            return []
+    
+    def _extract_table_with_coordinates(
+        self,
+        pdf_path: str,
+        table_mapping: TableMapping,
+        pdf_width: float,
+        pdf_height: float,
+        language: str
+    ) -> List[Dict]:
+        """
+        Extraherar tabelldata med koordinatbaserad cell-extraktion.
+        
+        Args:
+            pdf_path: Sökväg till PDF
+            table_mapping: Tabellmappning med kolumn- och radkoordinater
+            pdf_width: PDF-bredd i points
+            pdf_height: PDF-höjd i points
+            language: OCR-språk
+        
+        Returns:
+            Lista med dictionaries med tabelldata
+        """
+        table_data = []
+        
+        # Sortera kolumner efter index
+        sorted_columns = sorted(
+            table_mapping.columns,
+            key=lambda c: c.get("index", 0)
+        )
+        
+        # Sortera rader efter index
+        sorted_rows = []
+        if table_mapping.row_coords:
+            sorted_rows = sorted(
+                table_mapping.row_coords,
+                key=lambda r: r.get("y", 0)
+            )
+        
+        # Om inga rader är mappade, försök skapa rader från header
+        if not sorted_rows and table_mapping.header_row_coords:
+            # Anta samma radhöjd som header och skapa rader nedåt
+            header_coords = table_mapping.header_row_coords
+            header_y = header_coords.get("y", 0)
+            header_height = header_coords.get("height", 0.05)
+            table_top = table_mapping.table_coords.get("y", 0)
+            table_bottom = table_top + table_mapping.table_coords.get("height", 0)
+            
+            # Skapa rader med samma höjd som header
+            current_y = header_y + header_height
+            row_index = 0
+            while current_y < table_bottom:
+                sorted_rows.append({
+                    "y": current_y,
+                    "height": header_height,
+                    "index": row_index
+                })
+                current_y += header_height
+                row_index += 1
+        
+        # Extrahera data från varje cell
+        for row_info in sorted_rows:
+            row_y = row_info.get("y", 0)
+            row_height = row_info.get("height", 0.05)
+            
+            row_data = {}
+            for col_mapping in sorted_columns:
+                col_name = col_mapping.get("name", "")
+                col_coords = col_mapping.get("coords")
                 
-                # Lägg till rad om den inte är tom
-                if any(row_data.values()):
-                    table_data.append(row_data)
+                if col_coords:
+                    # Beräkna cellkoordinater
+                    cell_coords = {
+                        "x": col_coords.get("x", 0),
+                        "y": row_y,
+                        "width": col_coords.get("width", 0),
+                        "height": row_height
+                    }
+                    
+                    # Extrahera text från cell
+                    cell_text = self.text_extractor.extract_table_cell(
+                        pdf_path,
+                        0,
+                        cell_coords,
+                        pdf_width,
+                        pdf_height,
+                        language
+                    )
+                    
+                    row_data[col_name] = cell_text.strip()
+                else:
+                    row_data[col_name] = ""
             
-            return table_data
+            # Lägg till rad om den inte är helt tom
+            if any(row_data.values()):
+                table_data.append(row_data)
+        
+        return table_data
+    
+    def _extract_table_from_text(
+        self,
+        lines: List[str],
+        table_mapping: TableMapping
+    ) -> List[Dict]:
+        """
+        Extraherar tabelldata från text (fallback-metod).
+        
+        Args:
+            lines: Text raderad i linjer
+            table_mapping: Tabellmappning
+        
+        Returns:
+            Lista med dictionaries med tabelldata
+        """
+        table_data = []
+        
+        # För nu, extrahera rader baserat på kolumnmappningar
+        start_line = 0
+        if table_mapping.has_header_row:
+            start_line = 1
+        
+        # Identifiera tabellrader (rader med flera kolumner)
+        table_lines = []
+        for line in lines:
+            # Kontrollera om raden ser ut som en tabellrad
+            parts = re.split(r'\s{2,}|\t', line.strip())
+            if len(parts) >= len(table_mapping.columns):
+                table_lines.append(parts)
+        
+        # Mappa kolumner
+        for row_parts in table_lines[start_line:]:
+            row_data = {}
+            for col_mapping in table_mapping.columns:
+                col_index = col_mapping.get("index", 0)
+                col_name = col_mapping.get("name", "")
+                if col_index < len(row_parts):
+                    row_data[col_name] = row_parts[col_index].strip()
+                else:
+                    row_data[col_name] = ""
+            
+            # Lägg till rad om den inte är tom
+            if any(row_data.values()):
+                table_data.append(row_data)
+        
+        return table_data
+    
+    def _match_column(
+        self,
+        col_coords: Dict,
+        available_columns: List[Dict],
+        tolerance: float = 0.05
+    ) -> Optional[int]:
+        """
+        Matchar en kolumnkoordinat mot tillgängliga kolumner.
+        
+        Args:
+            col_coords: Kolumnkoordinater att matcha
+            available_columns: Lista med tillgängliga kolumnkoordinater
+            tolerance: Tolerans för matchning (normaliserad)
+        
+        Returns:
+            Index för matchad kolumn eller None
+        """
+        col_x = col_coords.get("x", 0)
+        col_width = col_coords.get("width", 0)
+        col_center = col_x + col_width / 2
+        
+        best_match = None
+        best_distance = float('inf')
+        
+        for idx, available_col in enumerate(available_columns):
+            avail_coords = available_col.get("coords", {})
+            avail_x = avail_coords.get("x", 0)
+            avail_width = avail_coords.get("width", 0)
+            avail_center = avail_x + avail_width / 2
+            
+            distance = abs(col_center - avail_center)
+            if distance < tolerance and distance < best_distance:
+                best_match = idx
+                best_distance = distance
+        
+        return best_match
             
         except CoordinateError:
             # Propagera CoordinateError

@@ -150,3 +150,69 @@ class TextExtractor:
         except Exception as e:
             logger.error(f"Fel vid extraktion av tabell: {e}", exc_info=True)
             return []
+    
+    def extract_table_cell(
+        self,
+        pdf_path: str,
+        page_num: int,
+        cell_coords: dict,
+        pdf_width: float,
+        pdf_height: float,
+        language: str = "swe+eng"
+    ) -> str:
+        """
+        Extraherar text från en specifik cell i en tabell.
+        
+        Args:
+            pdf_path: Sökväg till PDF
+            page_num: Sidnummer (0-indexerat)
+            cell_coords: Dictionary med x, y, width, height (normaliserade 0.0-1.0)
+            pdf_width: PDF:s bredd i points
+            pdf_height: PDF:s höjd i points
+            language: Tesseract språkkod
+        
+        Returns:
+            Extraherad text från cellen
+        """
+        try:
+            # Hämta PDF-bild
+            pdf_image = self.pdf_processor.get_page_image(pdf_path, page_num)
+            if not pdf_image:
+                return ""
+            
+            # Konvertera normaliserade koordinater till pixel-koordinater
+            img_width, img_height = pdf_image.size
+            
+            x = int(cell_coords.get("x", 0) * img_width)
+            y = int(cell_coords.get("y", 0) * img_height)
+            width = int(cell_coords.get("width", 0) * img_width)
+            height = int(cell_coords.get("height", 0) * img_height)
+            
+            # Säkerställ att koordinaterna är inom bildens gränser
+            x = max(0, min(img_width, x))
+            y = max(0, min(img_height, y))
+            width = max(1, min(img_width - x, width))
+            height = max(1, min(img_height - y, height))
+            
+            # Klipp ut cellområdet
+            cell_region = pdf_image.crop((x, y, x + width, y + height))
+            
+            # Förbehandla bilden för bättre OCR-resultat
+            try:
+                processed_image = self.pdf_processor._preprocess_image(
+                    cell_region,
+                    enable_adaptive_threshold=True,
+                    enable_noise_reduction=True,
+                    enable_contrast_enhancement=True,
+                    enable_skew_correction=False
+                )
+            except Exception:
+                processed_image = cell_region
+            
+            # OCR på cellen med angivet språk
+            text = pytesseract.image_to_string(processed_image, lang=language)
+            return text.strip()
+        
+        except Exception as e:
+            logger.error(f"Fel vid extraktion från cell: {e}", exc_info=True)
+            return ""

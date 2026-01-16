@@ -21,6 +21,7 @@ from ..core.text_extractor import TextExtractor
 from ..core.field_detector import FieldDetector, FieldType, ConfidenceLevel
 from ..core.logger import get_logger, log_error_with_context
 from .table_mapping_dialog import TableMappingDialog
+from .visual_table_mapping_dialog import VisualTableMappingDialog
 
 
 class ValueHeaderMappingDialog(QDialog):
@@ -114,6 +115,8 @@ class PDFViewer(QFrame):
     
     value_selected = Signal(QRect)  # Emitteras när användaren markerar ett värde
     table_selected = Signal(QRect)  # Emitteras när användaren markerar en tabell
+    column_selected = Signal(QRect)  # Emitteras när användaren markerar en kolumn
+    row_selected = Signal(QRect)  # Emitteras när användaren markerar en rad
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -126,7 +129,7 @@ class PDFViewer(QFrame):
         self.min_scale = 0.1
         self.max_scale = 5.0
         self.selection_rect: Optional[QRect] = None
-        self.selection_mode = None  # "value" eller "table"
+        self.selection_mode = None  # "value", "table", "column", "row"
         self.pan_start_pos: Optional[QPoint] = None
         self.pan_offset = QPoint(0, 0)
         self.is_panning = False
@@ -134,6 +137,10 @@ class PDFViewer(QFrame):
         # Mappade områden att visa
         self.field_mappings: List[Dict] = []  # [{"name": "...", "coords": {...}, "value": "..."}]
         self.table_mappings: List[Dict] = []  # [{"name": "...", "coords": {...}}]
+        
+        # Kolumn- och radmappningar
+        self.column_mappings: List[Dict] = []  # [{"name": "...", "coords": {...}, "index": int}, ...]
+        self.row_mappings: List[Dict] = []  # [{"coords": {...}, "index": int, "is_header": bool}, ...]
         
         self.setMouseTracking(True)
     
@@ -169,7 +176,7 @@ class PDFViewer(QFrame):
         self.update()
     
     def set_selection_mode(self, mode: Optional[str]):
-        """Sätter läge för markering (None, 'value', 'table')."""
+        """Sätter läge för markering (None, 'value', 'table', 'column', 'row')."""
         self.selection_mode = mode
         self.selection_rect = None
     
@@ -179,6 +186,16 @@ class PDFViewer(QFrame):
             self.field_mappings = field_mappings
         if table_mappings is not None:
             self.table_mappings = table_mappings
+        self.update()
+    
+    def set_column_mappings(self, column_mappings: List[Dict]):
+        """Sätter kolumnmappningar att visa."""
+        self.column_mappings = column_mappings
+        self.update()
+    
+    def set_row_mappings(self, row_mappings: List[Dict]):
+        """Sätter radmappningar att visa."""
+        self.row_mappings = row_mappings
         self.update()
     
     def mousePressEvent(self, event):
@@ -239,6 +256,10 @@ class PDFViewer(QFrame):
                 self.value_selected.emit(normalized_rect)
             elif self.selection_mode == "table":
                 self.table_selected.emit(normalized_rect)
+            elif self.selection_mode == "column":
+                self.column_selected.emit(normalized_rect)
+            elif self.selection_mode == "row":
+                self.row_selected.emit(normalized_rect)
             
             self.selection_rect = None
             self.update()
@@ -441,6 +462,71 @@ class PDFViewer(QFrame):
                             label_text
                         )
                         # Förbättrad bakgrund med padding och högre opacity
+                        painter.fillRect(text_rect.adjusted(-3, -2, 3, 2), QColor(255, 255, 255, 240))
+                        painter.setPen(QColor(0, 0, 0))
+                        painter.drawText(text_rect, label_text)
+            
+            # Rita mappade kolumner (lodräta rektanglar)
+            for idx, col in enumerate(self.column_mappings):
+                coords = col.get("coords")
+                if coords:
+                    rect = self._denormalize_rect(coords)
+                    if rect:
+                        # Lila färg för kolumner med anpassad tjocklek
+                        pen_width = max(2, int(2 * self.scale_factor))
+                        pen = QPen(QColor(150, 0, 255), pen_width)
+                        painter.setPen(pen)
+                        
+                        # Semi-transparent fyllning
+                        brush = QColor(150, 0, 255, 30)
+                        painter.fillRect(rect, brush)
+                        painter.drawRect(rect)
+                        
+                        # Visa kolumnnamn och nummer överst
+                        col_name = col.get("name", f"Kolum {idx + 1}")
+                        col_index = col.get("index", idx)
+                        label_text = f"↕️ {col_name} (#{col_index + 1})"
+                        
+                        text_y = max(2, rect.y() - 18)
+                        text_rect = painter.boundingRect(
+                            rect.x(), text_y,
+                            rect.width(), 18,
+                            Qt.AlignLeft,
+                            label_text
+                        )
+                        painter.fillRect(text_rect.adjusted(-3, -2, 3, 2), QColor(255, 255, 255, 240))
+                        painter.setPen(QColor(0, 0, 0))
+                        painter.drawText(text_rect, label_text)
+            
+            # Rita mappade rader (vågräta rektanglar)
+            for idx, row in enumerate(self.row_mappings):
+                coords = row.get("coords")
+                is_header = row.get("is_header", False)
+                if coords:
+                    rect = self._denormalize_rect(coords)
+                    if rect:
+                        # Orange färg för rader, gul för header
+                        color = QColor(255, 165, 0) if not is_header else QColor(255, 215, 0)
+                        pen_width = max(2, int(2 * self.scale_factor))
+                        pen = QPen(color, pen_width)
+                        painter.setPen(pen)
+                        
+                        # Semi-transparent fyllning
+                        brush = QColor(color.red(), color.green(), color.blue(), 30)
+                        painter.fillRect(rect, brush)
+                        painter.drawRect(rect)
+                        
+                        # Visa radnummer till vänster
+                        row_index = row.get("index", idx)
+                        label_text = f"{'📋 ' if is_header else '↔️ '}Rad #{row_index + 1}"
+                        
+                        text_x = max(2, rect.x() - 100)
+                        text_rect = painter.boundingRect(
+                            text_x, rect.y(),
+                            98, rect.height(),
+                            Qt.AlignRight | Qt.AlignVCenter,
+                            label_text
+                        )
                         painter.fillRect(text_rect.adjusted(-3, -2, 3, 2), QColor(255, 255, 255, 240))
                         painter.setPen(QColor(0, 0, 0))
                         painter.drawText(text_rect, label_text)
@@ -1139,16 +1225,30 @@ class MappingTab(QWidget):
             if reply == QMessageBox.No:
                 return
         
-        # Öppna dialog för kolumnmappning
-        dialog = TableMappingDialog(self, table_rows=table_rows)
-        if dialog.exec():
-            column_mappings, has_header_row, header_row_idx = dialog.get_result()
+        # Öppna visuell tabellmappningsdialog
+        ocr_language = getattr(self.current_template, 'ocr_language', 'swe+eng') if self.current_template else 'swe+eng'
+        dialog = VisualTableMappingDialog(
+            self,
+            pdf_path=self.current_doc.file_path,
+            pdf_dimensions=self.pdf_dimensions,
+            table_coords={
+                "x": rect.x() / 1000.0,
+                "y": rect.y() / 1000.0,
+                "width": rect.width() / 1000.0,
+                "height": rect.height() / 1000.0
+            },
+            text_extractor=self.text_extractor,
+            ocr_language=ocr_language
+        )
+        
+        if dialog.exec() == QDialog.Accepted:
+            column_mappings, row_coords, header_row_coords, has_header_row = dialog.get_result()
             
             if not column_mappings:
                 QMessageBox.warning(
                     self,
                     "Inga kolumner",
-                    "Du måste mappa minst en kolumn.\n\nAnge kolumnnamn i dialogfönstret."
+                    "Du måste mappa minst en kolumn.\n\nMarkera kolumner i dialogfönstret."
                 )
                 return
             
@@ -1163,7 +1263,9 @@ class MappingTab(QWidget):
                         "height": rect.height() / 1000.0
                     },
                     columns=column_mappings,
-                    has_header_row=has_header_row
+                    has_header_row=has_header_row,
+                    row_coords=row_coords if row_coords else None,
+                    header_row_coords=header_row_coords
                 )
                 
                 # Ta bort befintlig tabellmappning om den finns
@@ -1195,8 +1297,9 @@ class MappingTab(QWidget):
                 
                 self._refresh_field_list()
                 self._update_mappings_display()
+                row_count = len(row_coords) if row_coords else 0
                 self.status_label.setText(
-                    f"Tabell mappad! {len(column_mappings)} kolumner, {len(table_rows)} rader extraherade."
+                    f"Tabell mappad! {len(column_mappings)} kolumner, {row_count} rader mappade."
                 )
                 
             except Exception as e:

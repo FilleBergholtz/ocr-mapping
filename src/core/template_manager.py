@@ -29,8 +29,10 @@ class TableMapping:
     """Representerar en tabellmappning."""
     table_name: str
     table_coords: Dict  # {"x": 0.1, "y": 0.3, "width": 0.8, "height": 0.5}
-    columns: List[Dict]  # [{"name": "Art.nr", "index": 0, "coords": {...}}, ...]
+    columns: List[Dict]  # [{"name": "Art.nr", "index": 0, "coords": {"x": 0.1, "y": 0.3, "width": 0.15, "height": 0.5}}, ...]
     has_header_row: bool = True
+    row_coords: Optional[List[Dict]] = None  # [{"y": 0.3, "height": 0.05, "index": 0}, ...]
+    header_row_coords: Optional[Dict] = None  # {"y": 0.3, "height": 0.05}
 
 
 @dataclass
@@ -56,7 +58,9 @@ class Template:
                     "table_name": tm.table_name,
                     "table_coords": tm.table_coords,
                     "columns": tm.columns,
-                    "has_header_row": tm.has_header_row
+                    "has_header_row": tm.has_header_row,
+                    "row_coords": tm.row_coords,
+                    "header_row_coords": tm.header_row_coords
                 }
                 for tm in self.table_mappings
             ]
@@ -73,7 +77,9 @@ class Template:
                 table_name=tm["table_name"],
                 table_coords=tm["table_coords"],
                 columns=tm["columns"],
-                has_header_row=tm.get("has_header_row", True)
+                has_header_row=tm.get("has_header_row", True),
+                row_coords=tm.get("row_coords"),
+                header_row_coords=tm.get("header_row_coords")
             )
             for tm in data.get("table_mappings", [])
         ]
