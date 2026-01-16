@@ -18,6 +18,7 @@ from ..core.template_manager import TemplateManager, Template, FieldMapping, Tab
 from ..core.pdf_processor import PDFProcessor
 from ..core.extraction_engine import ExtractionEngine
 from ..core.text_extractor import TextExtractor
+from ..core.field_detector import FieldDetector, FieldType, ConfidenceLevel
 from ..core.logger import get_logger, log_error_with_context
 from .table_mapping_dialog import TableMappingDialog
 
@@ -25,11 +26,15 @@ from .table_mapping_dialog import TableMappingDialog
 class ValueHeaderMappingDialog(QDialog):
     """Dialog för mappning av värde-rubrik-fält."""
     
-    def __init__(self, parent=None, extracted_value: str = ""):
+    def __init__(self, parent=None, extracted_value: str = "", context_text: str = ""):
         super().__init__(parent)
         self.setWindowTitle("Mappa Fält")
         self.setModal(True)
         self.setMinimumWidth(500)
+        
+        self.field_detector = FieldDetector()
+        self.detected_field_type: Optional[FieldType] = None
+        self.suggested_field_name: Optional[str] = None
         
         layout = QVBoxLayout(self)
         
@@ -41,9 +46,41 @@ class ValueHeaderMappingDialog(QDialog):
         self.value_display.setPlainText(extracted_value if extracted_value else "(Ingen text hittades)")
         layout.addWidget(self.value_display)
         
+        # Detektera fälttyp och visa förslag
+        if extracted_value and extracted_value.strip():
+            detection = self.field_detector.detect_field_type(extracted_value.strip(), context=context_text)
+            if detection.field_type != FieldType.UNKNOWN:
+                self.detected_field_type = detection.field_type
+                self.suggested_field_name = self.field_detector.suggest_field_name(detection.field_type)
+                
+                # Visa förslag
+                confidence_text = {
+                    ConfidenceLevel.HIGH: "hög",
+                    ConfidenceLevel.MEDIUM: "medium",
+                    ConfidenceLevel.LOW: "låg"
+                }
+                suggestion_label = QLabel(
+                    f"<b>Förslag baserat på detektering:</b><br>"
+                    f"Fälttyp: <b>{self.suggested_field_name}</b> "
+                    f"(Konfidens: {confidence_text.get(detection.confidence, 'okänd')})"
+                )
+                suggestion_label.setWordWrap(True)
+                suggestion_label.setStyleSheet("background-color: #e8f4f8; padding: 8px; border-radius: 4px;")
+                layout.addWidget(suggestion_label)
+        
         layout.addWidget(QLabel("Rubrik (som står nära värdet):"))
         self.header_input = QLineEdit()
         layout.addWidget(self.header_input)
+        
+        layout.addWidget(QLabel("Fältnamn:"))
+        self.field_name_input = QLineEdit()
+        # Auto-fylla fältnamn om detekterat
+        if self.suggested_field_name:
+            self.field_name_input.setText(self.suggested_field_name)
+            self.field_name_input.setPlaceholderText(self.suggested_field_name)
+        else:
+            self.field_name_input.setPlaceholderText("T.ex. Fakturanummer, Datum, etc.")
+        layout.addWidget(self.field_name_input)
         
         layout.addWidget(QLabel("Typ:"))
         self.type_combo = QComboBox()
@@ -60,9 +97,14 @@ class ValueHeaderMappingDialog(QDialog):
         layout.addLayout(button_layout)
     
     def get_result(self) -> tuple:
-        """Returnerar (header_text, is_recurring)."""
+        """Returnerar (header_text, field_name, is_recurring)."""
+        field_name = self.field_name_input.text().strip()
+        if not field_name and self.suggested_field_name:
+            # Använd förslag om inget namn angivet
+            field_name = self.suggested_field_name
         return (
             self.header_input.text(),
+            field_name if field_name else "",
             self.type_combo.currentIndex() == 1
         )
 
@@ -483,6 +525,7 @@ class MappingTab(QWidget):
         self.pdf_processor = PDFProcessor()
         self.extraction_engine = ExtractionEngine(self.pdf_processor)
         self.text_extractor = TextExtractor(self.pdf_processor)
+        self.field_detector = FieldDetector()
         self.logger = get_logger()
         
         self.current_cluster_id: Optional[str] = None
@@ -920,10 +963,37 @@ class MappingTab(QWidget):
             )
             return
         
-        # Öppna dialog för rubrikmappning med extraherad text
-        dialog = ValueHeaderMappingDialog(self, extracted_value=extracted_value)
+        # Hämta närliggande text för kontextbaserad detektering
+        context_text = ""
+        try:
+            # Försök extrahera lite mer text runt området för kontext
+            extended_coords = {
+                "x": max(0, rect.x() / 1000.0 - 0.05),
+                "y": max(0, rect.y() / 1000.0 - 0.02),
+                "width": min(1.0, rect.width() / 1000.0 + 0.1),
+                "height": min(1.0, rect.height() / 1000.0 + 0.04)
+            }
+            ocr_language = getattr(self.current_template, 'ocr_language', 'swe+eng') if self.current_template else 'swe+eng'
+            context_text = self.text_extractor.extract_text_from_region(
+                self.current_doc.file_path,
+                0,
+                extended_coords,
+                self.pdf_dimensions[0],
+                self.pdf_dimensions[1],
+                language=ocr_language
+            )
+        except Exception:
+            # Om kontextextraktion misslyckas, använd bara det extraherade värdet
+            context_text = extracted_value
+        
+        # Öppna dialog för rubrikmappning med extraherad text och kontext
+        dialog = ValueHeaderMappingDialog(self, extracted_value=extracted_value, context_text=context_text)
         if dialog.exec():
-            header_text, is_recurring = dialog.get_result()
+            header_text, detected_field_name, is_recurring = dialog.get_result()
+            
+            # Använd detekterat fältnamn om inget angivet
+            if detected_field_name:
+                field_name = detected_field_name
             
             try:
                 # Skapa fältmappning
@@ -976,7 +1046,10 @@ class MappingTab(QWidget):
                 
                 self._refresh_field_list()
                 self._update_mappings_display()
-                self.status_label.setText(f"Fält '{field_name}' mappat! Extraherad text: {extracted_value[:50]}...")
+                detection_info = ""
+                if detected_field_name and detected_field_name != field_name:
+                    detection_info = f" (Detekterat: {detected_field_name})"
+                self.status_label.setText(f"Fält '{field_name}' mappat!{detection_info} Extraherad text: {extracted_value[:50]}...")
                 
             except Exception as e:
                 log_error_with_context(
