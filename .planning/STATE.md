@@ -55,6 +55,25 @@
 - Helper-funktioner för dependency-detektering med caching
 - UI-status för dependencies i DocumentTypesTab
 
+### Phase 2 - Kärnfunktioner & Förbättringar (In Progress)
+
+**Plan 01: Tabellmappning-förbättringar** ✅
+- Automatisk header-rad detektering baserat på mönster
+- Tabellvalidering med varningar före sparning
+- Förhandsgranskning av extraherad tabell i realtid
+- Färgkodning av tomma/problemiska celler
+
+**Plan 02: OCR-förbättringar** ✅
+- Förbättrad bildförbehandling med adaptive thresholding och noise reduction
+- Multi-språkstöd med språkval per kluster via templates
+- Kontrastförbättring och skew correction-stöd
+
+**Plan 03: Smart fältdetektering** ✅
+- Automatisk identifiering av vanliga fälttyper (fakturanummer, datum, belopp, etc.)
+- Mönsterbaserad identifiering med regex och nyckelord
+- Förslag till fälttyper i UI baserat på detektering
+- Konfidensnivåer för transparens i detektering
+
 ### Earlier Accomplishments
 
 - Created GitHub repository (ocr-mapping)
@@ -66,5 +85,5 @@
 1. ✅ Phase 1 completion verified (VERIFICATION.md created)
 2. ✅ Phase 2 - Plan 01 executed and completed (Tabellmappning-förbättringar)
 3. ✅ Phase 2 - Plan 02 executed and completed (OCR-förbättringar)
-4. Plan Phase 2 - Plan 03: Smart fältdetektering (nästa hög prioritet)
-5. Eller: Ytterligare förbättringar om behov uppstår
+4. ✅ Phase 2 - Plan 03 executed and completed (Smart fältdetektering)
+5. Plan Phase 2 - Plan 04: Mappningsmallar-bibliotek (nästa hög prioritet) eller ytterligare förbättringar
