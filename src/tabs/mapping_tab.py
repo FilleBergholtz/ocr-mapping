@@ -6,10 +6,10 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QListWidget,
     QListWidgetItem, QLabel, QDialog, QLineEdit, QComboBox, QCheckBox,
     QMessageBox, QGroupBox, QScrollArea, QFrame, QTextEdit, QTableWidget,
-    QTableWidgetItem, QHeaderView
+    QTableWidgetItem, QHeaderView, QSlider
 )
 from PySide6.QtCore import Qt, Signal, QRect, QPoint
-from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QImage
+from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QImage, QWheelEvent
 from PIL import Image
 import io
 from typing import Optional, Dict, List, Tuple
@@ -78,21 +78,29 @@ class PDFViewer(QFrame):
         self.setStyleSheet("background-color: white; border: 1px solid gray;")
         
         self.pdf_image: Optional[QPixmap] = None
+        self.original_image: Optional[QPixmap] = None  # Originalbild för zoom
         self.scale_factor = 1.0
+        self.min_scale = 0.1
+        self.max_scale = 5.0
         self.selection_rect: Optional[QRect] = None
         self.selection_mode = None  # "value" eller "table"
+        self.pan_start_pos: Optional[QPoint] = None
+        self.pan_offset = QPoint(0, 0)
+        self.is_panning = False
         
         self.setMouseTracking(True)
     
     def set_pdf_image(self, pixmap: QPixmap):
         """Sätter PDF-bilden."""
         self.pdf_image = pixmap
+        self.original_image = pixmap
         # Skala för att passa i widget
         if pixmap:
             self.scale_factor = min(
                 self.width() / pixmap.width(),
                 self.height() / pixmap.height()
             ) * 0.9
+            self.pan_offset = QPoint(0, 0)
         self.update()
     
     def set_selection_mode(self, mode: Optional[str]):
@@ -102,20 +110,33 @@ class PDFViewer(QFrame):
     
     def mousePressEvent(self, event):
         """Hanterar musklick."""
-        if self.selection_mode and event.button() == Qt.LeftButton:
+        if event.button() == Qt.MiddleButton or (event.button() == Qt.LeftButton and event.modifiers() & Qt.AltModifier):
+            # Starta panning
+            self.is_panning = True
+            self.pan_start_pos = event.pos()
+        elif self.selection_mode and event.button() == Qt.LeftButton:
             self.start_pos = event.pos()
             self.selection_rect = QRect(self.start_pos, self.start_pos)
             self.update()
     
     def mouseMoveEvent(self, event):
         """Hanterar musrörelse."""
-        if self.selection_mode and self.selection_rect is not None:
+        if self.is_panning and self.pan_start_pos:
+            # Panning
+            delta = event.pos() - self.pan_start_pos
+            self.pan_offset += delta
+            self.pan_start_pos = event.pos()
+            self.update()
+        elif self.selection_mode and self.selection_rect is not None:
             self.selection_rect = QRect(self.start_pos, event.pos()).normalized()
             self.update()
     
     def mouseReleaseEvent(self, event):
         """Hanterar musrelease."""
-        if self.selection_mode and self.selection_rect:
+        if self.is_panning:
+            self.is_panning = False
+            self.pan_start_pos = None
+        elif self.selection_mode and self.selection_rect:
             # Konvertera till normaliserade koordinater (0.0-1.0)
             normalized_rect = self._normalize_rect(self.selection_rect)
             
@@ -127,39 +148,77 @@ class PDFViewer(QFrame):
             self.selection_rect = None
             self.update()
     
+    def wheelEvent(self, event: QWheelEvent):
+        """Hanterar scrollhjul för zoom."""
+        if not self.pdf_image:
+            return
+        
+        # Beräkna zoom-faktor
+        delta = event.angleDelta().y()
+        zoom_factor = 1.1 if delta > 0 else 0.9
+        
+        # Begränsa zoom
+        new_scale = self.scale_factor * zoom_factor
+        if self.min_scale <= new_scale <= self.max_scale:
+            self.scale_factor = new_scale
+            self.update()
+    
     def _normalize_rect(self, rect: QRect) -> QRect:
-        """Konverterar rektangel till normaliserade koordinater (0.0-1.0)."""
+        """
+        Konverterar rektangel till normaliserade koordinater (0.0-1.0).
+        
+        Förbättrad version som hanterar olika PDF-storlekar, DPI-inställningar och panning korrekt.
+        """
         if not self.pdf_image:
             return rect
         
-        # Konvertera från widget-koordinater till bild-koordinater
-        img_width = self.pdf_image.width() * self.scale_factor
-        img_height = self.pdf_image.height() * self.scale_factor
+        # Hämta faktisk bildstorlek (inte widget-storlek)
+        img_width = self.pdf_image.width()
+        img_height = self.pdf_image.height()
         
-        x_offset = (self.width() - img_width) / 2
-        y_offset = (self.height() - img_height) / 2
+        if img_width <= 0 or img_height <= 0:
+            return rect
         
-        # Justera rektangel till bild-koordinater
-        adj_x = rect.x() - x_offset
-        adj_y = rect.y() - y_offset
+        # Beräkna skalad bildstorlek i widget
+        scaled_width = img_width * self.scale_factor
+        scaled_height = img_height * self.scale_factor
         
-        # Normalisera till 0.0-1.0 baserat på bildstorlek
-        if img_width > 0 and img_height > 0:
-            # Använd bildstorlek för normalisering (inte widget-storlek)
-            normalized_x = max(0, min(1, adj_x / img_width))
-            normalized_y = max(0, min(1, adj_y / img_height))
-            normalized_width = max(0, min(1, rect.width() / img_width))
-            normalized_height = max(0, min(1, rect.height() / img_height))
-            
-            # Returnera som QRect med normaliserade värden (multiplicerade med 1000 för precision)
-            return QRect(
-                int(normalized_x * 1000),
-                int(normalized_y * 1000),
-                int(normalized_width * 1000),
-                int(normalized_height * 1000)
-            )
+        # Beräkna offset för centrerad bild (inklusive panning)
+        x_offset = max(0, (self.width() - scaled_width) / 2) + self.pan_offset.x()
+        y_offset = max(0, (self.height() - scaled_height) / 2) + self.pan_offset.y()
         
-        return rect
+        # Konvertera widget-koordinater till bild-koordinater
+        # Subtrahera offset och dividera med scale_factor för att få pixel-koordinater
+        adj_x = (rect.x() - x_offset) / self.scale_factor
+        adj_y = (rect.y() - y_offset) / self.scale_factor
+        adj_width = rect.width() / self.scale_factor
+        adj_height = rect.height() / self.scale_factor
+        
+        # Säkerställ att koordinaterna är inom bildens gränser
+        adj_x = max(0, min(img_width, adj_x))
+        adj_y = max(0, min(img_height, adj_y))
+        adj_width = max(0, min(img_width - adj_x, adj_width))
+        adj_height = max(0, min(img_height - adj_y, adj_height))
+        
+        # Normalisera till 0.0-1.0 baserat på faktisk bildstorlek
+        normalized_x = adj_x / img_width
+        normalized_y = adj_y / img_height
+        normalized_width = adj_width / img_width
+        normalized_height = adj_height / img_height
+        
+        # Säkerställ att värdena är inom [0, 1]
+        normalized_x = max(0.0, min(1.0, normalized_x))
+        normalized_y = max(0.0, min(1.0, normalized_y))
+        normalized_width = max(0.0, min(1.0 - normalized_x, normalized_width))
+        normalized_height = max(0.0, min(1.0 - normalized_y, normalized_height))
+        
+        # Returnera som QRect med normaliserade värden (multiplicerade med 1000 för precision)
+        return QRect(
+            int(normalized_x * 1000),
+            int(normalized_y * 1000),
+            int(normalized_width * 1000),
+            int(normalized_height * 1000)
+        )
     
     def paintEvent(self, event):
         """Ritar PDF-bilden och markeringar."""
@@ -167,12 +226,13 @@ class PDFViewer(QFrame):
         painter.setRenderHint(QPainter.Antialiasing)
         
         if self.pdf_image:
-            # Rita PDF-bilden centrerad
+            # Rita PDF-bilden med zoom och panning
             scaled_width = int(self.pdf_image.width() * self.scale_factor)
             scaled_height = int(self.pdf_image.height() * self.scale_factor)
             
-            x_offset = (self.width() - scaled_width) / 2
-            y_offset = (self.height() - scaled_height) / 2
+            # Beräkna position med panning
+            x_offset = (self.width() - scaled_width) / 2 + self.pan_offset.x()
+            y_offset = (self.height() - scaled_height) / 2 + self.pan_offset.y()
             
             painter.drawPixmap(
                 int(x_offset), int(y_offset),
@@ -279,6 +339,20 @@ class MappingTab(QWidget):
         # Höger panel: PDF-visning
         right_panel = QVBoxLayout()
         
+        # Zoom-kontroller
+        zoom_layout = QHBoxLayout()
+        zoom_layout.addWidget(QLabel("Zoom:"))
+        self.zoom_slider = QSlider(Qt.Horizontal)
+        self.zoom_slider.setMinimum(10)  # 0.1x
+        self.zoom_slider.setMaximum(500)  # 5.0x
+        self.zoom_slider.setValue(90)  # 0.9x (default)
+        self.zoom_slider.valueChanged.connect(self._on_zoom_changed)
+        zoom_layout.addWidget(self.zoom_slider)
+        self.zoom_label = QLabel("90%")
+        zoom_layout.addWidget(self.zoom_label)
+        zoom_layout.addWidget(QLabel("(Scrollhjul för zoom, Alt+Klick för panning)"))
+        right_panel.addLayout(zoom_layout)
+        
         self.pdf_viewer = PDFViewer()
         self.pdf_viewer.value_selected.connect(self._on_value_selected)
         self.pdf_viewer.table_selected.connect(self._on_table_selected)
@@ -346,6 +420,19 @@ class MappingTab(QWidget):
         self.save_template_btn.setEnabled(True)
         
         self.status_label.setText(f"Mappar kluster: {cluster_id}")
+        
+        # Uppdatera zoom-slider
+        if self.pdf_viewer.scale_factor:
+            zoom_percent = int(self.pdf_viewer.scale_factor * 100)
+            self.zoom_slider.setValue(zoom_percent)
+            self.zoom_label.setText(f"{zoom_percent}%")
+    
+    def _on_zoom_changed(self, value: int):
+        """Hanterar zoom-ändring från slider."""
+        if self.pdf_viewer:
+            self.pdf_viewer.scale_factor = value / 100.0
+            self.pdf_viewer.update()
+            self.zoom_label.setText(f"{value}%")
     
     def _refresh_field_list(self):
         """Uppdaterar fältlistan."""
@@ -557,16 +644,27 @@ class MappingTab(QWidget):
             
             # Visa resultat
             result_text = "Extraherade fält:\n"
-            for key, value in result["fields"].items():
-                result_text += f"  {key}: {value}\n"
+            if result["fields"]:
+                for key, value in result["fields"].items():
+                    result_text += f"  {key}: {value}\n"
+            else:
+                result_text += "  (Inga fält extraherade)\n"
             
             result_text += "\nExtraherade tabeller:\n"
-            for table_name, rows in result["tables"].items():
-                result_text += f"  {table_name}: {len(rows)} rader\n"
+            if result["tables"]:
+                for table_name, rows in result["tables"].items():
+                    result_text += f"  {table_name}: {len(rows)} rader\n"
+            else:
+                result_text += "  (Inga tabeller extraherade)\n"
             
             QMessageBox.information(self, "Testresultat", result_text)
         except Exception as e:
-            QMessageBox.critical(self, "Fel", f"Fel vid extraktion: {e}")
+            error_msg = f"Fel vid extraktion: {str(e)}"
+            if "poppler" in str(e).lower():
+                error_msg += "\n\nKontrollera att Poppler är installerat och korrekt konfigurerat."
+            elif "tesseract" in str(e).lower():
+                error_msg += "\n\nKontrollera att Tesseract OCR är installerat och korrekt konfigurerat."
+            QMessageBox.critical(self, "Fel vid Extraktion", error_msg)
     
     def _map_all_in_cluster(self):
         """Applicerar mallen på alla PDF:er i klustret."""
@@ -600,7 +698,9 @@ class MappingTab(QWidget):
                     self.document_manager.update_document(doc)
                 except Exception as e:
                     doc.status = "error"
-                    print(f"Fel vid extraktion från {doc.file_path}: {e}")
+                    from ..core.logger import get_logger
+                    logger = get_logger()
+                    logger.error(f"Fel vid extraktion från {doc.file_path}: {e}", exc_info=True)
             
             # Fråga om granskning
             reply = QMessageBox.question(

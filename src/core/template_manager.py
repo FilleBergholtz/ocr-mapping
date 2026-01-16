@@ -6,6 +6,9 @@ import json
 from typing import Dict, List, Optional
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
+from .logger import get_logger
+
+logger = get_logger()
 
 
 @dataclass
@@ -129,7 +132,7 @@ class TemplateManager:
                 template = Template.from_dict(data)
                 self.templates[template.cluster_id] = template
             except Exception as e:
-                print(f"Fel vid laddning av mall {template_file}: {e}")
+                logger.error(f"Fel vid laddning av mall {template_file}: {e}", exc_info=True)
     
     def delete_template(self, cluster_id: str):
         """Raderar en mall."""

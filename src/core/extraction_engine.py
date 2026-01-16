@@ -7,6 +7,9 @@ from typing import Dict, List, Optional, Tuple
 from .template_manager import Template, FieldMapping, TableMapping
 from .pdf_processor import PDFProcessor
 from .document_manager import PDFDocument
+from .logger import get_logger
+
+logger = get_logger()
 
 
 class ExtractionEngine:

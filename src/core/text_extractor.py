@@ -7,6 +7,9 @@ from PIL import Image
 import pytesseract
 import re
 from .pdf_processor import PDFProcessor
+from .logger import get_logger
+
+logger = get_logger()
 
 
 class TextExtractor:
@@ -58,7 +61,7 @@ class TextExtractor:
             return text.strip()
         
         except Exception as e:
-            print(f"Fel vid extraktion från område: {e}")
+            logger.error(f"Fel vid extraktion från område: {e}", exc_info=True)
             return ""
     
     def extract_table_text(
@@ -109,5 +112,5 @@ class TextExtractor:
             return rows
         
         except Exception as e:
-            print(f"Fel vid extraktion av tabell: {e}")
+            logger.error(f"Fel vid extraktion av tabell: {e}", exc_info=True)
             return []
