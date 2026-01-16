@@ -118,6 +118,11 @@ class DocumentTypesTab(QWidget):
         self.scan_btn.setEnabled(False)
         button_layout.addWidget(self.scan_btn)
         
+        self.delete_cluster_btn = QPushButton("🗑️ Ta bort valt kluster")
+        self.delete_cluster_btn.clicked.connect(self._delete_selected_cluster)
+        self.delete_cluster_btn.setEnabled(False)
+        button_layout.addWidget(self.delete_cluster_btn)
+        
         button_layout.addStretch()
         layout.addLayout(button_layout)
         
@@ -128,6 +133,7 @@ class DocumentTypesTab(QWidget):
         self.cluster_list = QListWidget()
         self.cluster_list.itemDoubleClicked.connect(self._on_cluster_double_clicked)
         self.cluster_list.itemClicked.connect(self._on_cluster_clicked)
+        self.cluster_list.itemSelectionChanged.connect(self._on_cluster_selection_changed)
         cluster_layout.addWidget(self.cluster_list)
         
         # Klusterinfo
@@ -223,6 +229,93 @@ class DocumentTypesTab(QWidget):
         """Hanterar klick på kluster."""
         cluster_id = item.data(Qt.UserRole)
         self._show_cluster_info(cluster_id)
+    
+    def _on_cluster_selection_changed(self):
+        """Hanterar när klusterval ändras - aktiverar/deaktiverar ta bort-knappen."""
+        has_selection = len(self.cluster_list.selectedItems()) > 0
+        self.delete_cluster_btn.setEnabled(has_selection)
+    
+    def _delete_selected_cluster(self):
+        """Tar bort valt kluster."""
+        selected_items = self.cluster_list.selectedItems()
+        if not selected_items:
+            QMessageBox.warning(
+                self,
+                "Inget valt",
+                "Välj ett kluster att ta bort först."
+            )
+            return
+        
+        item = selected_items[0]
+        cluster_id = item.data(Qt.UserRole)
+        
+        # Hämta klusterinfo för bekräftelse
+        cluster_docs = self.document_manager.get_cluster_documents(cluster_id)
+        template = self.template_manager.get_template(cluster_id)
+        
+        # Bekräftelse-dialog
+        confirm_msg = f"Är du säker på att du vill ta bort klustret '{cluster_id}'?\n\n"
+        confirm_msg += f"Detta kluster innehåller {len(cluster_docs)} filer.\n"
+        if template:
+            confirm_msg += f"Mall med {len(template.field_mappings)} fält och {len(template.table_mappings)} tabeller kommer också att raderas.\n\n"
+        confirm_msg += "Detta kan inte ångras."
+        
+        reply = QMessageBox.question(
+            self,
+            "Bekräfta borttagning",
+            confirm_msg,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                # Ta bort template om den finns
+                if template:
+                    self.template_manager.delete_template(cluster_id)
+                
+                # Ta bort kluster från document manager
+                # Dokument behålls men klusterassociation raderas
+                if cluster_id in self.document_manager.clusters:
+                    # Hämta alla dokument i klustret
+                    cluster_file_paths = self.document_manager.clusters[cluster_id]
+                    
+                    # Ta bort kluster från document manager
+                    del self.document_manager.clusters[cluster_id]
+                    
+                    # Om referensdokument finns, ta bort referens-flaggan
+                    for doc in self.document_manager.get_all_documents():
+                        if doc.file_path in cluster_file_paths:
+                            doc.is_reference = False
+                            # Återställ status om det var mapped
+                            if doc.status == "mapped":
+                                doc.status = "processed"
+                            # Rensa cluster_id
+                            doc.cluster_id = None
+                            # Spara uppdateringar
+                            self.document_manager.update_document(doc)
+                    
+                    # Ta bort referensdokument från reference_docs om det finns
+                    if cluster_id in self.document_manager.reference_docs:
+                        del self.document_manager.reference_docs[cluster_id]
+                    
+                    # Spara ändringar i document manager
+                    self.document_manager._save_data()
+                
+                # Uppdatera UI
+                self.refresh_clusters()
+                self.cluster_info.clear()
+                self.status_label.setText(f"Kluster '{cluster_id}' har tagits bort.")
+                
+                logger.info(f"Kluster '{cluster_id}' har tagits bort av användaren")
+                
+            except Exception as e:
+                logger.error(f"Fel vid borttagning av kluster '{cluster_id}': {e}", exc_info=True)
+                QMessageBox.critical(
+                    self,
+                    "Fel",
+                    f"Kunde inte ta bort kluster '{cluster_id}'.\n\nFel: {str(e)}"
+                )
     
     def _on_cluster_double_clicked(self, item: QListWidgetItem):
         """Hanterar dubbelklick på kluster - öppnar mapping."""
