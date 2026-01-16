@@ -1046,7 +1046,7 @@ class MappingTab(QWidget):
         # Öppna dialog för kolumnmappning
         dialog = TableMappingDialog(self, table_rows=table_rows)
         if dialog.exec():
-            column_mappings = dialog.get_result()
+            column_mappings, has_header_row, header_row_idx = dialog.get_result()
             
             if not column_mappings:
                 QMessageBox.warning(
@@ -1067,7 +1067,7 @@ class MappingTab(QWidget):
                         "height": rect.height() / 1000.0
                     },
                     columns=column_mappings,
-                    has_header_row=True
+                    has_header_row=has_header_row
                 )
                 
                 # Ta bort befintlig tabellmappning om den finns
