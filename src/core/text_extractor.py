@@ -132,9 +132,12 @@ class TextExtractor:
                     if len(columns) == 1:
                         # Försök med enkla mellanslag för rader som ser ut som tabellrader
                         columns = line.split()
-                        # Om raden ser ut som tabell-data (blandning av text och siffror), behandla varje ord som kolumn
+                        # Om raden har flera ord, behandla varje ord som kolumn
                         if len(columns) >= 2:
                             rows.append([col.strip() for col in columns])
+                        else:
+                            # Om bara ett ord, lägg till som en-kolumns rad (för debugging)
+                            rows.append([line.strip()])
                     else:
                         # Flera kolumner hittades med flera mellanslag/tabs
                         rows.append([col.strip() for col in columns])
