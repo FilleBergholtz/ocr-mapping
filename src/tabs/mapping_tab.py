@@ -18,6 +18,7 @@ from ..core.template_manager import TemplateManager, Template, FieldMapping, Tab
 from ..core.pdf_processor import PDFProcessor
 from ..core.extraction_engine import ExtractionEngine
 from ..core.text_extractor import TextExtractor
+from ..core.logger import get_logger, log_error_with_context
 from .table_mapping_dialog import TableMappingDialog
 
 
@@ -482,6 +483,7 @@ class MappingTab(QWidget):
         self.pdf_processor = PDFProcessor()
         self.extraction_engine = ExtractionEngine(self.pdf_processor)
         self.text_extractor = TextExtractor(self.pdf_processor)
+        self.logger = get_logger()
         
         self.current_cluster_id: Optional[str] = None
         self.current_doc: Optional[PDFDocument] = None
@@ -593,61 +595,127 @@ class MappingTab(QWidget):
         """Laddar ett kluster för mappning."""
         self.current_cluster_id = cluster_id
         
-        # Hämta referensdokument
-        ref_doc = self.document_manager.get_reference_document(cluster_id)
-        if not ref_doc:
-            QMessageBox.warning(self, "Fel", "Inget referensdokument hittades för klustret.")
-            return
+        try:
+            # Hämta referensdokument
+            ref_doc = self.document_manager.get_reference_document(cluster_id)
+            if not ref_doc:
+                self.logger.warning(f"Inget referensdokument hittades för kluster: {cluster_id}")
+                QMessageBox.warning(
+                    self,
+                    "Fel",
+                    f"Inget referensdokument hittades för klustret '{cluster_id}'.\n\nKontrollera att klustret innehåller PDF:er."
+                )
+                return
+            
+            self.current_doc = ref_doc
+            
+            # Ladda eller skapa template
+            try:
+                template = self.template_manager.get_template(cluster_id)
+                if not template:
+                    template = self.template_manager.create_template(
+                        cluster_id, ref_doc.file_path
+                    )
+                self.current_template = template
+            except Exception as e:
+                log_error_with_context(
+                    self.logger, e,
+                    {"cluster_id": cluster_id, "file_path": ref_doc.file_path},
+                    "Fel vid laddning/skapande av template"
+                )
+                QMessageBox.critical(
+                    self,
+                    "Fel",
+                    f"Kunde inte ladda eller skapa mappningsmall för klustret.\n\nKontrollera att mappningsmallar är korrekt formaterade."
+                )
+                return
+            
+            # Hämta PDF-dimensioner (validera att PDF kan läsas)
+            try:
+                self.pdf_dimensions = self.pdf_processor.get_pdf_dimensions(ref_doc.file_path)
+                if not self.pdf_dimensions:
+                    raise ValueError("PDF-dimensioner kunde inte hämtas")
+            except Exception as e:
+                log_error_with_context(
+                    self.logger, e,
+                    {"file_path": ref_doc.file_path, "cluster_id": cluster_id},
+                    "Fel vid hämtning av PDF-dimensioner"
+                )
+                QMessageBox.critical(
+                    self,
+                    "Fel",
+                    f"Kunde inte läsa PDF: '{ref_doc.file_path}'.\n\nKontrollera att PDF:en är korruptfri och inte lösenordsskyddad."
+                )
+                return
+            
+            # Ladda PDF-bild
+            try:
+                pdf_image = self.pdf_processor.get_page_image(ref_doc.file_path, 0)
+                if pdf_image:
+                    # Konvertera PIL Image till QImage
+                    # PIL Image -> bytes -> QImage
+                    img_bytes = io.BytesIO()
+                    pdf_image.save(img_bytes, format='PNG')
+                    img_bytes.seek(0)
+                    
+                    qimage = QImage()
+                    qimage.loadFromData(img_bytes.getvalue())
+                    
+                    # Konvertera QImage till QPixmap
+                    pixmap = QPixmap.fromImage(qimage)
+                    self.pdf_viewer.set_pdf_image(pixmap)
+                else:
+                    self.logger.warning(f"Kunde inte generera PDF-bild för: {ref_doc.file_path}")
+                    QMessageBox.warning(
+                        self,
+                        "Varning",
+                        f"Kunde inte visa PDF: '{ref_doc.file_path}'.\n\nPDF:en kan vara skannad - OCR kan krävas."
+                    )
+            except Exception as e:
+                log_error_with_context(
+                    self.logger, e,
+                    {"file_path": ref_doc.file_path, "cluster_id": cluster_id},
+                    "Fel vid laddning av PDF-bild"
+                )
+                QMessageBox.critical(
+                    self,
+                    "Fel",
+                    f"Kunde inte ladda PDF-bild: '{ref_doc.file_path}'.\n\nKontrollera att Poppler är installerat för PDF-till-bild konvertering."
+                )
+                return
+            
+            # Uppdatera fältlista
+            self._refresh_field_list()
+            
+            # Uppdatera mappningar i PDFViewer
+            self._update_mappings_display()
+            
+            # Aktivera knappar
+            self.map_value_btn.setEnabled(True)
+            self.map_table_btn.setEnabled(True)
+            self.test_btn.setEnabled(True)
+            self.map_all_btn.setEnabled(True)
+            self.save_template_btn.setEnabled(True)
+            
+            self.status_label.setText(f"Mappar kluster: {cluster_id}")
+            
+            # Uppdatera zoom-slider
+            if self.pdf_viewer.scale_factor:
+                zoom_percent = int(self.pdf_viewer.scale_factor * 100)
+                self.zoom_slider.setValue(zoom_percent)
+                self.zoom_label.setText(f"{zoom_percent}%")
         
-        self.current_doc = ref_doc
-        
-        # Ladda eller skapa template
-        template = self.template_manager.get_template(cluster_id)
-        if not template:
-            template = self.template_manager.create_template(
-                cluster_id, ref_doc.file_path
+        except Exception as e:
+            log_error_with_context(
+                self.logger, e,
+                {"cluster_id": cluster_id},
+                "Oväntat fel vid laddning av kluster"
             )
-        self.current_template = template
-        
-        # Hämta PDF-dimensioner
-        self.pdf_dimensions = self.pdf_processor.get_pdf_dimensions(ref_doc.file_path)
-        
-        # Ladda PDF-bild
-        pdf_image = self.pdf_processor.get_page_image(ref_doc.file_path, 0)
-        if pdf_image:
-            # Konvertera PIL Image till QImage
-            # PIL Image -> bytes -> QImage
-            img_bytes = io.BytesIO()
-            pdf_image.save(img_bytes, format='PNG')
-            img_bytes.seek(0)
-            
-            qimage = QImage()
-            qimage.loadFromData(img_bytes.getvalue())
-            
-            # Konvertera QImage till QPixmap
-            pixmap = QPixmap.fromImage(qimage)
-            self.pdf_viewer.set_pdf_image(pixmap)
-        
-        # Uppdatera fältlista
-        self._refresh_field_list()
-        
-        # Uppdatera mappningar i PDFViewer
-        self._update_mappings_display()
-        
-        # Aktivera knappar
-        self.map_value_btn.setEnabled(True)
-        self.map_table_btn.setEnabled(True)
-        self.test_btn.setEnabled(True)
-        self.map_all_btn.setEnabled(True)
-        self.save_template_btn.setEnabled(True)
-        
-        self.status_label.setText(f"Mappar kluster: {cluster_id}")
-        
-        # Uppdatera zoom-slider
-        if self.pdf_viewer.scale_factor:
-            zoom_percent = int(self.pdf_viewer.scale_factor * 100)
-            self.zoom_slider.setValue(zoom_percent)
-            self.zoom_label.setText(f"{zoom_percent}%")
+            QMessageBox.critical(
+                self,
+                "Fel",
+                f"Ett oväntat fel inträffade vid laddning av klustret.\n\nLoggar innehåller mer information för debugging."
+            )
     
     def _on_zoom_changed(self, value: int):
         """
@@ -794,9 +862,28 @@ class MappingTab(QWidget):
         
         field_name = current_item.data(Qt.UserRole)
         
+        # Validera att PDF-dimensioner finns
+        if not self.current_doc:
+            self.logger.warning("Inget dokument laddat vid värde-mappning")
+            QMessageBox.warning(
+                self,
+                "Fel",
+                "Inget dokument är laddat.\n\nLadda ett kluster först."
+            )
+            return
+        
+        if not self.pdf_dimensions:
+            self.logger.warning(f"PDF-dimensioner saknas för: {self.current_doc.file_path}")
+            QMessageBox.warning(
+                self,
+                "Fel",
+                "Kunde inte hämta PDF-dimensioner.\n\nFörsök ladda klustret igen."
+            )
+            return
+        
         # Extrahera text från markerat område
         extracted_value = ""
-        if self.current_doc and self.pdf_dimensions:
+        try:
             # Konvertera widget-koordinater till normaliserade koordinater
             # PDFViewer returnerar redan normaliserade koordinater
             coords = {
@@ -813,66 +900,119 @@ class MappingTab(QWidget):
                 self.pdf_dimensions[0],
                 self.pdf_dimensions[1]
             )
+        except Exception as e:
+            log_error_with_context(
+                self.logger, e,
+                {
+                    "field_name": field_name,
+                    "file_path": self.current_doc.file_path,
+                    "coords": coords
+                },
+                "Fel vid textextraktion från markerat område"
+            )
+            QMessageBox.critical(
+                self,
+                "Fel",
+                f"Kunde inte extrahera text från markerat område för '{field_name}'.\n\nKontrollera att PDF:en kan läsas korrekt."
+            )
+            return
         
         # Öppna dialog för rubrikmappning med extraherad text
         dialog = ValueHeaderMappingDialog(self, extracted_value=extracted_value)
         if dialog.exec():
             header_text, is_recurring = dialog.get_result()
             
-            # Skapa fältmappning
-            field_mapping = FieldMapping(
-                field_name=field_name,
-                field_type="value_header",
-                value_coords={
-                    "x": rect.x() / 1000.0,  # Normalisera
-                    "y": rect.y() / 1000.0,
-                    "width": rect.width() / 1000.0,
-                    "height": rect.height() / 1000.0
-                },
-                header_text=header_text,
-                is_recurring=is_recurring
-            )
-            
-            # Lägg till i template
-            # Ta bort befintlig mappning för samma fält
-            self.current_template.field_mappings = [
-                fm for fm in self.current_template.field_mappings
-                if fm.field_name != field_name
-            ]
-            self.current_template.field_mappings.append(field_mapping)
-            
-            # Testa extraktion för att få värdet att visa
             try:
-                result = self.extraction_engine.extract_data(
-                    self.current_doc.file_path,
-                    self.current_template
+                # Skapa fältmappning
+                field_mapping = FieldMapping(
+                    field_name=field_name,
+                    field_type="value_header",
+                    value_coords={
+                        "x": rect.x() / 1000.0,  # Normalisera
+                        "y": rect.y() / 1000.0,
+                        "width": rect.width() / 1000.0,
+                        "height": rect.height() / 1000.0
+                    },
+                    header_text=header_text,
+                    is_recurring=is_recurring
                 )
-                if result and "fields" in result:
-                    # Spara extraherade värden temporärt för visning
+                
+                # Lägg till i template
+                # Ta bort befintlig mappning för samma fält
+                self.current_template.field_mappings = [
+                    fm for fm in self.current_template.field_mappings
+                    if fm.field_name != field_name
+                ]
+                self.current_template.field_mappings.append(field_mapping)
+                
+                # Testa extraktion för att få värdet att visa
+                try:
+                    result = self.extraction_engine.extract_data(
+                        self.current_doc.file_path,
+                        self.current_template
+                    )
+                    if result and "fields" in result:
+                        # Spara extraherade värden temporärt för visning
+                        if not self.current_doc.extracted_data:
+                            self.current_doc.extracted_data = {}
+                        if "fields" not in self.current_doc.extracted_data:
+                            self.current_doc.extracted_data["fields"] = {}
+                        self.current_doc.extracted_data["fields"][field_name] = result["fields"].get(field_name, extracted_value)
+                except Exception as e:
+                    # Om extraktion misslyckas, använd det ursprungliga extraherade värdet
+                    log_error_with_context(
+                        self.logger, e,
+                        {"field_name": field_name, "file_path": self.current_doc.file_path},
+                        "Fel vid test-extraktion efter mappning"
+                    )
                     if not self.current_doc.extracted_data:
                         self.current_doc.extracted_data = {}
                     if "fields" not in self.current_doc.extracted_data:
                         self.current_doc.extracted_data["fields"] = {}
-                    self.current_doc.extracted_data["fields"][field_name] = result["fields"].get(field_name, extracted_value)
-            except Exception:
-                # Om extraktion misslyckas, använd det ursprungliga extraherade värdet
-                if not self.current_doc.extracted_data:
-                    self.current_doc.extracted_data = {}
-                if "fields" not in self.current_doc.extracted_data:
-                    self.current_doc.extracted_data["fields"] = {}
-                self.current_doc.extracted_data["fields"][field_name] = extracted_value
-            
-            self._refresh_field_list()
-            self._update_mappings_display()
-            self.status_label.setText(f"Fält '{field_name}' mappat! Extraherad text: {extracted_value[:50]}...")
+                    self.current_doc.extracted_data["fields"][field_name] = extracted_value
+                
+                self._refresh_field_list()
+                self._update_mappings_display()
+                self.status_label.setText(f"Fält '{field_name}' mappat! Extraherad text: {extracted_value[:50]}...")
+                
+            except Exception as e:
+                log_error_with_context(
+                    self.logger, e,
+                    {"field_name": field_name, "header_text": header_text},
+                    "Fel vid skapande av fältmappning"
+                )
+                QMessageBox.critical(
+                    self,
+                    "Fel",
+                    f"Kunde inte skapa mappning för '{field_name}'.\n\nKontrollera att mappningsmallar är korrekt formaterade."
+                )
     
     def _on_table_selected(self, rect: QRect):
         """Hanterar när användaren markerat en tabell."""
         self.pdf_viewer.set_selection_mode(None)
         
+        # Validera att PDF-dimensioner finns
+        if not self.current_doc:
+            self.logger.warning("Inget dokument laddat vid tabell-mappning")
+            QMessageBox.warning(
+                self,
+                "Fel",
+                "Inget dokument är laddat.\n\nLadda ett kluster först."
+            )
+            return
+        
+        if not self.pdf_dimensions:
+            self.logger.warning(f"PDF-dimensioner saknas för: {self.current_doc.file_path}")
+            QMessageBox.warning(
+                self,
+                "Fel",
+                "Kunde inte hämta PDF-dimensioner.\n\nFörsök ladda klustret igen."
+            )
+            return
+        
         # Extrahera tabelltext
         table_rows = []
-        if self.current_doc and self.pdf_dimensions:
+        try:
             table_coords = {
                 "x": rect.x() / 1000.0,
                 "y": rect.y() / 1000.0,
@@ -887,6 +1027,21 @@ class MappingTab(QWidget):
                 self.pdf_dimensions[0],
                 self.pdf_dimensions[1]
             )
+        except Exception as e:
+            log_error_with_context(
+                self.logger, e,
+                {
+                    "file_path": self.current_doc.file_path,
+                    "table_coords": table_coords
+                },
+                "Fel vid tabelltextextraktion"
+            )
+            QMessageBox.critical(
+                self,
+                "Fel",
+                f"Kunde inte extrahera text från markerat tabellområde.\n\nKontrollera att PDF:en kan läsas korrekt."
+            )
+            return
         
         # Öppna dialog för kolumnmappning
         dialog = TableMappingDialog(self, table_rows=table_rows)
@@ -894,49 +1049,71 @@ class MappingTab(QWidget):
             column_mappings = dialog.get_result()
             
             if not column_mappings:
-                QMessageBox.warning(self, "Inga kolumner", "Du måste mappa minst en kolumn.")
+                QMessageBox.warning(
+                    self,
+                    "Inga kolumner",
+                    "Du måste mappa minst en kolumn.\n\nAnge kolumnnamn i dialogfönstret."
+                )
                 return
             
-            # Skapa tabellmappning
-            table_mapping = TableMapping(
-                table_name="Artiklar",
-                table_coords={
-                    "x": rect.x() / 1000.0,
-                    "y": rect.y() / 1000.0,
-                    "width": rect.width() / 1000.0,
-                    "height": rect.height() / 1000.0
-                },
-                columns=column_mappings,
-                has_header_row=True
-            )
-            
-            # Ta bort befintlig tabellmappning om den finns
-            self.current_template.table_mappings = [
-                tm for tm in self.current_template.table_mappings
-                if tm.table_name != "Artiklar"
-            ]
-            
-            self.current_template.table_mappings.append(table_mapping)
-            
-            # Testa extraktion för att få tabelldata att visa
             try:
-                result = self.extraction_engine.extract_data(
-                    self.current_doc.file_path,
-                    self.current_template
+                # Skapa tabellmappning
+                table_mapping = TableMapping(
+                    table_name="Artiklar",
+                    table_coords={
+                        "x": rect.x() / 1000.0,
+                        "y": rect.y() / 1000.0,
+                        "width": rect.width() / 1000.0,
+                        "height": rect.height() / 1000.0
+                    },
+                    columns=column_mappings,
+                    has_header_row=True
                 )
-                if result and "tables" in result:
-                    # Spara extraherad data temporärt för visning
-                    if not self.current_doc.extracted_data:
-                        self.current_doc.extracted_data = {}
-                    self.current_doc.extracted_data["tables"] = result["tables"]
-            except Exception:
-                pass
-            
-            self._refresh_field_list()
-            self._update_mappings_display()
-            self.status_label.setText(
-                f"Tabell mappad! {len(column_mappings)} kolumner, {len(table_rows)} rader extraherade."
-            )
+                
+                # Ta bort befintlig tabellmappning om den finns
+                self.current_template.table_mappings = [
+                    tm for tm in self.current_template.table_mappings
+                    if tm.table_name != "Artiklar"
+                ]
+                
+                self.current_template.table_mappings.append(table_mapping)
+                
+                # Testa extraktion för att få tabelldata att visa
+                try:
+                    result = self.extraction_engine.extract_data(
+                        self.current_doc.file_path,
+                        self.current_template
+                    )
+                    if result and "tables" in result:
+                        # Spara extraherad data temporärt för visning
+                        if not self.current_doc.extracted_data:
+                            self.current_doc.extracted_data = {}
+                        self.current_doc.extracted_data["tables"] = result["tables"]
+                except Exception as e:
+                    log_error_with_context(
+                        self.logger, e,
+                        {"file_path": self.current_doc.file_path, "table_name": "Artiklar"},
+                        "Fel vid test-extraktion av tabell"
+                    )
+                    # Fortsätt även om test-extraktion misslyckas
+                
+                self._refresh_field_list()
+                self._update_mappings_display()
+                self.status_label.setText(
+                    f"Tabell mappad! {len(column_mappings)} kolumner, {len(table_rows)} rader extraherade."
+                )
+                
+            except Exception as e:
+                log_error_with_context(
+                    self.logger, e,
+                    {"column_mappings": len(column_mappings), "table_rows": len(table_rows)},
+                    "Fel vid skapande av tabellmappning"
+                )
+                QMessageBox.critical(
+                    self,
+                    "Fel",
+                    f"Kunde inte skapa tabellmappning.\n\nKontrollera att mappningsmallar är korrekt formaterade."
+                )
     
     def _create_custom_field(self):
         """Skapar ett eget fält."""
@@ -967,6 +1144,22 @@ class MappingTab(QWidget):
     def _test_extraction(self):
         """Testar extraktion på nuvarande PDF."""
         if not self.current_doc or not self.current_template:
+            self.logger.warning("Test-extraktion: Saknar dokument eller template")
+            QMessageBox.warning(
+                self,
+                "Varning",
+                "Inget dokument eller mappningsmall är laddat.\n\nLadda ett kluster först."
+            )
+            return
+        
+        # Validera att PDF-dimensioner finns
+        if not self.pdf_dimensions:
+            self.logger.warning(f"Test-extraktion: PDF-dimensioner saknas för: {self.current_doc.file_path}")
+            QMessageBox.warning(
+                self,
+                "Varning",
+                "Kunde inte hämta PDF-dimensioner.\n\nFörsök ladda klustret igen."
+            )
             return
         
         try:
@@ -977,14 +1170,18 @@ class MappingTab(QWidget):
             
             # Visa resultat
             result_text = "Extraherade fält:\n"
-            if result["fields"]:
+            if result.get("fields"):
                 for key, value in result["fields"].items():
-                    result_text += f"  {key}: {value}\n"
+                    # Begränsa längd på värden för läsbarhet
+                    value_str = str(value)[:100]
+                    if len(str(value)) > 100:
+                        value_str += "..."
+                    result_text += f"  {key}: {value_str}\n"
             else:
                 result_text += "  (Inga fält extraherade)\n"
             
             result_text += "\nExtraherade tabeller:\n"
-            if result["tables"]:
+            if result.get("tables"):
                 for table_name, rows in result["tables"].items():
                     result_text += f"  {table_name}: {len(rows)} rader\n"
             else:
@@ -1000,34 +1197,110 @@ class MappingTab(QWidget):
             self._update_mappings_display()
             
             QMessageBox.information(self, "Testresultat", result_text)
+            
         except Exception as e:
-            error_msg = f"Fel vid extraktion: {str(e)}"
-            if "poppler" in str(e).lower():
-                error_msg += "\n\nKontrollera att Poppler är installerat och korrekt konfigurerat."
-            elif "tesseract" in str(e).lower():
-                error_msg += "\n\nKontrollera att Tesseract OCR är installerat och korrekt konfigurerat."
+            # Logga fel med kontext för debugging
+            log_error_with_context(
+                self.logger, e,
+                {
+                    "file_path": self.current_doc.file_path,
+                    "cluster_id": self.current_cluster_id,
+                    "template_fields": len(self.current_template.field_mappings),
+                    "template_tables": len(self.current_template.table_mappings)
+                },
+                "Fel vid test-extraktion"
+            )
+            
+            # Bygg användarvänligt felmeddelande
+            error_msg = "Extraktion misslyckades."
+            
+            # Specifika felmeddelanden baserat på feltyp
+            error_str = str(e).lower()
+            if "poppler" in error_str or "pdfinfo" in error_str:
+                error_msg += "\n\nKontrollera att Poppler är installerat och korrekt konfigurerat.\n\nSe INSTALL_POPPLER.md för installationsinstruktioner."
+            elif "tesseract" in error_str or "tesseractnotfounderror" in error_str:
+                error_msg += "\n\nKontrollera att Tesseract OCR är installerat och korrekt konfigurerat.\n\nTesseract krävs för OCR-funktionalitet."
+            elif "coordinate" in error_str or "koordinat" in error_str:
+                error_msg += "\n\nKunde inte mappa koordinater.\n\nFörsök markera området igen eller kontrollera PDF:ens struktur."
+            else:
+                error_msg += f"\n\nFel: {str(e)[:200]}\n\nLoggar innehåller mer information för debugging."
+            
             QMessageBox.critical(self, "Fel vid Extraktion", error_msg)
     
     def _map_all_in_cluster(self):
         """Applicerar mallen på alla PDF:er i klustret."""
         if not self.current_cluster_id or not self.current_template:
+            self.logger.warning("Mappa alla: Saknar cluster_id eller template")
+            QMessageBox.warning(
+                self,
+                "Varning",
+                "Inget kluster eller mappningsmall är laddat.\n\nLadda ett kluster först."
+            )
+            return
+        
+        # Validera att template har några mappningar
+        if not self.current_template.field_mappings and not self.current_template.table_mappings:
+            QMessageBox.warning(
+                self,
+                "Varning",
+                "Mappningsmallen är tom.\n\nMappa minst ett fält eller en tabell innan du applicerar på alla PDF:er."
+            )
             return
         
         reply = QMessageBox.question(
             self,
             "Bekräfta",
-            f"Vill du applicera mallen på alla PDF:er i klustret?",
+            f"Vill du applicera mallen på alla PDF:er i klustret?\n\nDetta kommer att bearbeta alla PDF:er i klustret.",
             QMessageBox.Yes | QMessageBox.No
         )
         
         if reply == QMessageBox.Yes:
-            # Spara template först
-            self.template_manager.save_template(self.current_template)
+            try:
+                # Spara template först
+                self.template_manager.save_template(self.current_template)
+                self.logger.info(f"Sparat template för kluster: {self.current_cluster_id}")
+            except Exception as e:
+                log_error_with_context(
+                    self.logger, e,
+                    {"cluster_id": self.current_cluster_id},
+                    "Fel vid sparande av template"
+                )
+                QMessageBox.critical(
+                    self,
+                    "Fel",
+                    f"Kunde inte spara mappningsmall.\n\nKontrollera att mappningsmallar är korrekt formaterade."
+                )
+                return
             
             # Extrahera data från alla dokument
-            cluster_docs = self.document_manager.get_cluster_documents(
-                self.current_cluster_id
-            )
+            try:
+                cluster_docs = self.document_manager.get_cluster_documents(
+                    self.current_cluster_id
+                )
+            except Exception as e:
+                log_error_with_context(
+                    self.logger, e,
+                    {"cluster_id": self.current_cluster_id},
+                    "Fel vid hämtning av kluster-dokument"
+                )
+                QMessageBox.critical(
+                    self,
+                    "Fel",
+                    f"Kunde inte hämta dokument för klustret.\n\nKontrollera att klustret finns."
+                )
+                return
+            
+            if not cluster_docs:
+                QMessageBox.warning(
+                    self,
+                    "Varning",
+                    "Inga dokument hittades i klustret.\n\nKontrollera att klustret innehåller PDF:er."
+                )
+                return
+            
+            # Bearbeta varje dokument
+            successful = 0
+            failed = 0
             
             for doc in cluster_docs:
                 try:
@@ -1038,31 +1311,79 @@ class MappingTab(QWidget):
                     doc.extracted_data = result
                     doc.status = "mapped"
                     self.document_manager.update_document(doc)
+                    successful += 1
                 except Exception as e:
                     doc.status = "error"
-                    from ..core.logger import get_logger
-                    logger = get_logger()
-                    logger.error(f"Fel vid extraktion från {doc.file_path}: {e}", exc_info=True)
+                    failed += 1
+                    log_error_with_context(
+                        self.logger, e,
+                        {
+                            "file_path": doc.file_path,
+                            "cluster_id": self.current_cluster_id
+                        },
+                        "Fel vid extraktion från dokument"
+                    )
+            
+            # Visa resultat
+            result_msg = f"Mappning klar!\n\nLyckades: {successful} PDF:er\nMisslyckades: {failed} PDF:er"
+            if failed > 0:
+                result_msg += f"\n\n{failed} PDF:er kunde inte bearbetas. Kontrollera loggar för detaljer."
             
             # Fråga om granskning
-            reply = QMessageBox.question(
-                self,
-                "Granska?",
-                "Vill du granska resultaten?",
-                QMessageBox.Yes | QMessageBox.No
-            )
-            
-            if reply == QMessageBox.Yes:
-                self.mapping_completed.emit(self.current_cluster_id)
-            
-            QMessageBox.information(
-                self,
-                "Klar",
-                f"Mappning klar för {len(cluster_docs)} PDF:er!"
-            )
+            if successful > 0:
+                reply = QMessageBox.question(
+                    self,
+                    "Granska?",
+                    f"{result_msg}\n\nVill du granska resultaten?",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                
+                if reply == QMessageBox.Yes:
+                    self.mapping_completed.emit(self.current_cluster_id)
+                else:
+                    QMessageBox.information(
+                        self,
+                        "Klar",
+                        result_msg
+                    )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Varning",
+                    f"Ingen PDF kunde bearbetas.\n\nKontrollera loggar för detaljer."
+                )
     
     def _save_template(self):
         """Sparar mallen."""
-        if self.current_template:
+        if not self.current_template:
+            self.logger.warning("Spara mall: Inget template att spara")
+            QMessageBox.warning(
+                self,
+                "Varning",
+                "Ingen mappningsmall är laddat.\n\nLadda ett kluster först."
+            )
+            return
+        
+        try:
             self.template_manager.save_template(self.current_template)
-            QMessageBox.information(self, "Sparat", "Mall sparad!")
+            self.logger.info(f"Template sparad för kluster: {self.current_cluster_id}")
+            QMessageBox.information(
+                self,
+                "Sparat",
+                f"Mappningsmall sparad!\n\nKluster: {self.current_cluster_id or 'Okänt'}"
+            )
+        except Exception as e:
+            log_error_with_context(
+                self.logger, e,
+                {
+                    "cluster_id": self.current_cluster_id,
+                    "fields": len(self.current_template.field_mappings),
+                    "tables": len(self.current_template.table_mappings)
+                },
+                "Fel vid sparande av template"
+            )
+            QMessageBox.critical(
+                self,
+                "Fel",
+                f"Kunde inte spara mappningsmall.\n\nKontrollera att mappningsmallar är korrekt formaterade.\n\nLoggar innehåller mer information."
+            )
