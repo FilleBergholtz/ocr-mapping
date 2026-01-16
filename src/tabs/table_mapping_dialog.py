@@ -146,6 +146,12 @@ class TableMappingDialog(QDialog):
                     item = QTableWidgetItem("")
                 self.table_widget.setItem(row_idx, col_idx, item)
         
+        # Rensa befintliga kolumnnamn-inputs (ta bort gamla widgets från layouten)
+        while self.column_names_layout.count():
+            child = self.column_names_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+        
         # Skapa kolumnnamn-inputs
         self.column_inputs = []
         for col_idx in range(max_cols):
