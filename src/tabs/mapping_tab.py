@@ -88,25 +88,55 @@ class PDFViewer(QFrame):
         self.pan_offset = QPoint(0, 0)
         self.is_panning = False
         
+        # Mappade områden att visa
+        self.field_mappings: List[Dict] = []  # [{"name": "...", "coords": {...}, "value": "..."}]
+        self.table_mappings: List[Dict] = []  # [{"name": "...", "coords": {...}}]
+        
         self.setMouseTracking(True)
     
     def set_pdf_image(self, pixmap: QPixmap):
-        """Sätter PDF-bilden."""
+        """
+        Sätter PDF-bilden och initialiserar zoom/panning.
+        
+        Vid initial laddning sätts zoom till fit-to-widget (visa hela PDF:en).
+        Panning återställs till centrerad position.
+        
+        Args:
+            pixmap: QPixmap med PDF-bilddata
+        """
         self.pdf_image = pixmap
         self.original_image = pixmap
-        # Skala för att passa i widget
+        
+        # Initial scaling: visa hela PDF:en (fit-to-widget)
+        # Beräkna scale_factor för att bilden ska passa i widget med lite marginal (0.9)
         if pixmap:
-            self.scale_factor = min(
+            # Beräkna scale som passar både i bredd och höjd
+            scale_to_fit = min(
                 self.width() / pixmap.width(),
                 self.height() / pixmap.height()
-            ) * 0.9
+            ) * 0.9  # 0.9 ger 10% marginal
+            
+            # Begränsa till min_scale och max_scale
+            self.scale_factor = max(self.min_scale, min(self.max_scale, scale_to_fit))
+            
+            # Återställ panning till centrerad position
             self.pan_offset = QPoint(0, 0)
+        
+        # Trigga omritning
         self.update()
     
     def set_selection_mode(self, mode: Optional[str]):
         """Sätter läge för markering (None, 'value', 'table')."""
         self.selection_mode = mode
         self.selection_rect = None
+    
+    def set_mappings(self, field_mappings: List[Dict] = None, table_mappings: List[Dict] = None):
+        """Sätter mappningar att visa på PDF:en."""
+        if field_mappings is not None:
+            self.field_mappings = field_mappings
+        if table_mappings is not None:
+            self.table_mappings = table_mappings
+        self.update()
     
     def mousePressEvent(self, event):
         """Hanterar musklick."""
@@ -120,14 +150,36 @@ class PDFViewer(QFrame):
             self.update()
     
     def mouseMoveEvent(self, event):
-        """Hanterar musrörelse."""
+        """
+        Hanterar musrörelse för panning och markering.
+        
+        Panning begränsas till rimliga gränser så att bilden inte flyttas för långt
+        utanför widgeten. Detta förbättrar användarupplevelsen vid navigering.
+        """
         if self.is_panning and self.pan_start_pos:
-            # Panning
+            # Panning: beräkna delta och uppdatera panning-offset
             delta = event.pos() - self.pan_start_pos
-            self.pan_offset += delta
+            new_pan_offset = self.pan_offset + delta
+            
+            # Begränsa panning inom rimliga gränser
+            # Beräkna max panning baserat på bildstorlek och widget-storlek
+            if self.pdf_image:
+                scaled_width = int(self.pdf_image.width() * self.scale_factor)
+                scaled_height = int(self.pdf_image.height() * self.scale_factor)
+                
+                # Beräkna max offset (halva skillnaden mellan bild och widget)
+                max_x_offset = max(0, (scaled_width - self.width()) / 2)
+                max_y_offset = max(0, (scaled_height - self.height()) / 2)
+                
+                # Begränsa till max offset (eller 0 om bild är mindre än widget)
+                new_pan_offset.setX(max(-max_x_offset, min(max_x_offset, new_pan_offset.x())))
+                new_pan_offset.setY(max(-max_y_offset, min(max_y_offset, new_pan_offset.y())))
+            
+            self.pan_offset = new_pan_offset
             self.pan_start_pos = event.pos()
             self.update()
         elif self.selection_mode and self.selection_rect is not None:
+            # Markering: uppdatera selection-rektangel under dragning
             self.selection_rect = QRect(self.start_pos, event.pos()).normalized()
             self.update()
     
@@ -165,54 +217,82 @@ class PDFViewer(QFrame):
     
     def _normalize_rect(self, rect: QRect) -> QRect:
         """
-        Konverterar rektangel till normaliserade koordinater (0.0-1.0).
+        Konverterar widget-koordinater till normaliserade koordinater (0.0-1.0).
         
-        Förbättrad version som hanterar olika PDF-storlekar, DPI-inställningar och panning korrekt.
+        Denna metod är inversen till _denormalize_rect(). Den tar en rektangel i widget-koordinater
+        (relativa till PDFViewer-widgeten) och konverterar den till normaliserade koordinater
+        (0.0-1.0) relativa till den faktiska PDF-bildens dimensioner.
+        
+        Normaliserade koordinater används för att lagra mappningar oberoende av:
+        - PDF-storlek (A4, A3, Letter, etc.)
+        - DPI-inställningar (72, 150, 300 DPI, etc.)
+        - Zoom-nivå (0.1x - 5.0x)
+        - Panning-position
+        
+        Process:
+        1. Hämta faktisk bildstorlek (pixels)
+        2. Beräkna skalad bildstorlek i widget (med zoom)
+        3. Beräkna offset för centrerad bild (med panning)
+        4. Konvertera widget-koordinater → pixel-koordinater → normaliserade (0.0-1.0)
+        5. Returnera som QRect med värden multiplicerade med 1000 för precision
+        
+        Args:
+            rect: QRect i widget-koordinater (relativa till PDFViewer-widgeten)
+        
+        Returns:
+            QRect med normaliserade värden (x, y, width, height alla i [0, 1000])
+            Värden representerar position i faktisk PDF-bild (0.0-1.0 * 1000)
         """
         if not self.pdf_image:
             return rect
         
-        # Hämta faktisk bildstorlek (inte widget-storlek)
+        # Hämta faktisk bildstorlek i pixels (inte widget-storlek)
         img_width = self.pdf_image.width()
         img_height = self.pdf_image.height()
         
         if img_width <= 0 or img_height <= 0:
             return rect
         
-        # Beräkna skalad bildstorlek i widget
+        # Beräkna skalad bildstorlek i widget (med zoom-factor)
         scaled_width = img_width * self.scale_factor
         scaled_height = img_height * self.scale_factor
         
         # Beräkna offset för centrerad bild (inklusive panning)
+        # Bilden centreras i widget, plus eventuell panning-offset
         x_offset = max(0, (self.width() - scaled_width) / 2) + self.pan_offset.x()
         y_offset = max(0, (self.height() - scaled_height) / 2) + self.pan_offset.y()
         
-        # Konvertera widget-koordinater till bild-koordinater
-        # Subtrahera offset och dividera med scale_factor för att få pixel-koordinater
+        # Steg 1: Konvertera widget-koordinater till pixel-koordinater
+        # Subtrahera offset (för att kompensera centrering och panning)
+        # Dividera med scale_factor (för att kompensera zoom)
         adj_x = (rect.x() - x_offset) / self.scale_factor
         adj_y = (rect.y() - y_offset) / self.scale_factor
         adj_width = rect.width() / self.scale_factor
         adj_height = rect.height() / self.scale_factor
         
-        # Säkerställ att koordinaterna är inom bildens gränser
+        # Steg 2: Säkerställ att koordinaterna är inom bildens gränser
+        # Detta hanterar edge cases där markeringen går utanför bilden
         adj_x = max(0, min(img_width, adj_x))
         adj_y = max(0, min(img_height, adj_y))
         adj_width = max(0, min(img_width - adj_x, adj_width))
         adj_height = max(0, min(img_height - adj_y, adj_height))
         
-        # Normalisera till 0.0-1.0 baserat på faktisk bildstorlek
+        # Steg 3: Normalisera till 0.0-1.0 baserat på faktisk bildstorlek
+        # Detta gör koordinaterna oberoende av PDF-storlek och DPI
         normalized_x = adj_x / img_width
         normalized_y = adj_y / img_height
         normalized_width = adj_width / img_width
         normalized_height = adj_height / img_height
         
-        # Säkerställ att värdena är inom [0, 1]
+        # Steg 4: Säkerställ att värdena är strikt inom [0, 1]
+        # Extra säkerhet för floating-point precision-problem
         normalized_x = max(0.0, min(1.0, normalized_x))
         normalized_y = max(0.0, min(1.0, normalized_y))
         normalized_width = max(0.0, min(1.0 - normalized_x, normalized_width))
         normalized_height = max(0.0, min(1.0 - normalized_y, normalized_height))
         
         # Returnera som QRect med normaliserade värden (multiplicerade med 1000 för precision)
+        # QRect använder integers, så vi multiplicerar med 1000 för att behålla 3 decimals precision
         return QRect(
             int(normalized_x * 1000),
             int(normalized_y * 1000),
@@ -240,11 +320,150 @@ class PDFViewer(QFrame):
                 self.pdf_image
             )
             
-            # Rita markering om aktiv
+            # Rita aktiva markeringar (under mappning)
             if self.selection_rect:
-                pen = QPen(QColor(255, 0, 0), 2)
+                # Tydlig röd färg för aktiv markering med tillräcklig kontrast
+                # Använd tjocklek som anpassas för zoom (minst 2px, ökar vid zoom in)
+                pen_width = max(2, int(2 * self.scale_factor))
+                pen = QPen(QColor(255, 0, 0), pen_width)
                 painter.setPen(pen)
+                
+                # Semi-transparent fyllning för visuell feedback under dragning
+                brush = QColor(255, 0, 0, 30)  # Röd med låg opacity
+                painter.fillRect(self.selection_rect, brush)
                 painter.drawRect(self.selection_rect)
+            
+            # Rita mappade fältområden
+            for field in self.field_mappings:
+                coords = field.get("coords")
+                if coords:
+                    rect = self._denormalize_rect(coords)
+                    if rect:
+                        # Blå färg för fält med anpassad tjocklek för zoom
+                        # Tjocklek anpassas för bättre synlighet vid alla zoom-nivåer
+                        pen_width = max(2, int(2 * self.scale_factor))
+                        pen = QPen(QColor(0, 150, 255), pen_width)
+                        painter.setPen(pen)
+                        painter.drawRect(rect)
+                        
+                        # Visa fältnamn och värde ovanför rektangeln
+                        field_name = field.get("name", "")
+                        field_value = field.get("value", "")
+                        label_text = f"{field_name}"
+                        if field_value:
+                            label_text += f": {field_value[:30]}"
+                        
+                        # Beräkna textposition (ovanför eller inuti om nära toppen)
+                        text_y = max(2, rect.y() - 18)
+                        
+                        # Bakgrund för text med högre opacity för bättre läsbarhet
+                        # Font-size anpassas för zoom för att vara läsbar vid alla nivåer
+                        text_rect = painter.boundingRect(
+                            rect.x(), text_y,
+                            rect.width(), 18,
+                            Qt.AlignLeft,
+                            label_text
+                        )
+                        # Förbättrad bakgrund med padding och högre opacity
+                        painter.fillRect(text_rect.adjusted(-3, -2, 3, 2), QColor(255, 255, 255, 240))
+                        painter.setPen(QColor(0, 0, 0))
+                        painter.drawText(text_rect, label_text)
+            
+            # Rita mappade tabellområden
+            for table in self.table_mappings:
+                coords = table.get("coords")
+                if coords:
+                    rect = self._denormalize_rect(coords)
+                    if rect:
+                        # Grön färg för tabeller med anpassad tjocklek för zoom
+                        # Tjocklek anpassas för bättre synlighet vid alla zoom-nivåer
+                        pen_width = max(2, int(2 * self.scale_factor))
+                        pen = QPen(QColor(0, 200, 0), pen_width)
+                        painter.setPen(pen)
+                        painter.drawRect(rect)
+                        
+                        # Visa tabellnamn ovanför rektangeln
+                        table_name = table.get("name", "Tabell")
+                        label_text = f"📊 {table_name}"
+                        
+                        # Beräkna textposition (ovanför eller inuti om nära toppen)
+                        text_y = max(2, rect.y() - 18)
+                        
+                        # Bakgrund för text med högre opacity för bättre läsbarhet
+                        # Font-size anpassas för zoom för att vara läsbar vid alla nivåer
+                        text_rect = painter.boundingRect(
+                            rect.x(), text_y,
+                            rect.width(), 18,
+                            Qt.AlignLeft,
+                            label_text
+                        )
+                        # Förbättrad bakgrund med padding och högre opacity
+                        painter.fillRect(text_rect.adjusted(-3, -2, 3, 2), QColor(255, 255, 255, 240))
+                        painter.setPen(QColor(0, 0, 0))
+                        painter.drawText(text_rect, label_text)
+    
+    def _denormalize_rect(self, coords: Dict) -> Optional[QRect]:
+        """
+        Konverterar normaliserade koordinater (0.0-1.0) till widget-koordinater.
+        
+        Denna metod är inversen till _normalize_rect(). Den tar normaliserade koordinater
+        (0.0-1.0 relativa till faktisk PDF-bild) och konverterar dem till widget-koordinater
+        (relativa till PDFViewer-widgeten) med hänsyn till aktuell zoom och panning.
+        
+        Process:
+        1. Hämta normaliserade koordinater från dict (0.0-1.0)
+        2. Konvertera till pixel-koordinater (multiplicera med bildstorlek)
+        3. Skala till widget-storlek (multiplicera med scale_factor)
+        4. Lägg till offset för centrering och panning
+        5. Returnera som QRect i widget-koordinater
+        
+        Args:
+            coords: Dict med normaliserade koordinater {"x": 0.0-1.0, "y": 0.0-1.0, 
+                   "width": 0.0-1.0, "height": 0.0-1.0}
+        
+        Returns:
+            QRect i widget-koordinater, eller None om koordinater saknas eller är ogiltiga
+        """
+        if not self.pdf_image or not coords:
+            return None
+        
+        # Hämta normaliserade koordinater från dict (0.0-1.0)
+        norm_x = coords.get("x", 0)
+        norm_y = coords.get("y", 0)
+        norm_width = coords.get("width", 0)
+        norm_height = coords.get("height", 0)
+        
+        # Hämta faktisk bildstorlek i pixels
+        img_width = self.pdf_image.width()
+        img_height = self.pdf_image.height()
+        
+        if img_width <= 0 or img_height <= 0:
+            return None
+        
+        # Steg 1: Konvertera normaliserade koordinater till pixel-koordinater
+        # Multiplicera med faktisk bildstorlek för att få absoluta pixel-koordinater
+        pixel_x = norm_x * img_width
+        pixel_y = norm_y * img_height
+        pixel_width = norm_width * img_width
+        pixel_height = norm_height * img_height
+        
+        # Steg 2: Beräkna skalad bildstorlek i widget (med zoom-factor)
+        scaled_width = img_width * self.scale_factor
+        scaled_height = img_height * self.scale_factor
+        
+        # Steg 3: Beräkna offset för centrerad bild (inklusive panning)
+        # Samma beräkning som i _normalize_rect() för symmetri
+        x_offset = max(0, (self.width() - scaled_width) / 2) + self.pan_offset.x()
+        y_offset = max(0, (self.height() - scaled_height) / 2) + self.pan_offset.y()
+        
+        # Steg 4: Konvertera pixel-koordinater till widget-koordinater
+        # Multiplicera med scale_factor (för zoom) och lägg till offset (för centrering och panning)
+        widget_x = int(x_offset + pixel_x * self.scale_factor)
+        widget_y = int(y_offset + pixel_y * self.scale_factor)
+        widget_width = int(pixel_width * self.scale_factor)
+        widget_height = int(pixel_height * self.scale_factor)
+        
+        return QRect(widget_x, widget_y, widget_width, widget_height)
 
 
 class MappingTab(QWidget):
@@ -412,6 +631,9 @@ class MappingTab(QWidget):
         # Uppdatera fältlista
         self._refresh_field_list()
         
+        # Uppdatera mappningar i PDFViewer
+        self._update_mappings_display()
+        
         # Aktivera knappar
         self.map_value_btn.setEnabled(True)
         self.map_table_btn.setEnabled(True)
@@ -428,11 +650,63 @@ class MappingTab(QWidget):
             self.zoom_label.setText(f"{zoom_percent}%")
     
     def _on_zoom_changed(self, value: int):
-        """Hanterar zoom-ändring från slider."""
+        """
+        Hanterar zoom-ändring från slider.
+        
+        Synchroniserar zoom-slider med PDFViewer.scale_factor och uppdaterar zoom-label.
+        Begränsar zoom till min_scale och max_scale (0.1x - 5.0x).
+        """
         if self.pdf_viewer:
-            self.pdf_viewer.scale_factor = value / 100.0
+            # Konvertera slider-värde (10-500) till scale_factor (0.1-5.0)
+            new_scale = value / 100.0
+            
+            # Begränsa till min_scale och max_scale
+            new_scale = max(self.pdf_viewer.min_scale, min(self.pdf_viewer.max_scale, new_scale))
+            
+            # Uppdatera scale_factor i PDFViewer
+            self.pdf_viewer.scale_factor = new_scale
+            
+            # Trigga omritning
             self.pdf_viewer.update()
-            self.zoom_label.setText(f"{value}%")
+            
+            # Uppdatera zoom-label med faktisk zoom-nivå
+            actual_percent = int(new_scale * 100)
+            self.zoom_label.setText(f"{actual_percent}%")
+    
+    def _update_mappings_display(self):
+        """Uppdaterar visningen av mappningar i PDFViewer."""
+        if not self.current_template or not self.current_doc:
+            return
+        
+        # Bygg lista över fältmappningar med värden
+        field_mappings_display = []
+        for fm in self.current_template.field_mappings:
+            if fm.value_coords:
+                # Hämta extraherat värde om tillgängligt
+                extracted_value = ""
+                if self.current_doc.extracted_data and "fields" in self.current_doc.extracted_data:
+                    extracted_value = self.current_doc.extracted_data["fields"].get(fm.field_name, "")
+                
+                field_mappings_display.append({
+                    "name": fm.field_name,
+                    "coords": fm.value_coords,
+                    "value": str(extracted_value) if extracted_value else ""
+                })
+        
+        # Bygg lista över tabellmappningar
+        table_mappings_display = []
+        for tm in self.current_template.table_mappings:
+            if tm.table_coords:
+                table_mappings_display.append({
+                    "name": tm.table_name,
+                    "coords": tm.table_coords
+                })
+        
+        # Uppdatera PDFViewer
+        self.pdf_viewer.set_mappings(
+            field_mappings=field_mappings_display,
+            table_mappings=table_mappings_display
+        )
     
     def _refresh_field_list(self):
         """Uppdaterar fältlistan."""
@@ -448,19 +722,40 @@ class MappingTab(QWidget):
         ]
         
         for field_name in predefined_fields:
-            # Kolla om fältet redan är mappat
-            is_mapped = any(
-                fm.field_name == field_name
-                for fm in self.current_template.field_mappings
+            # Hitta mappning för detta fält
+            field_mapping = next(
+                (fm for fm in self.current_template.field_mappings if fm.field_name == field_name),
+                None
             )
+            
+            is_mapped = field_mapping is not None
             icon = "✓" if is_mapped else "○"
-            item = QListWidgetItem(f"{icon} {field_name}")
+            
+            # Hämta extraherat värde om tillgängligt
+            display_text = f"{icon} {field_name}"
+            if is_mapped and self.current_doc and self.current_doc.extracted_data:
+                extracted_value = self.current_doc.extracted_data.get("fields", {}).get(field_name, "")
+                if extracted_value:
+                    # Visa värde (begränsa längd)
+                    value_display = str(extracted_value)[:40]
+                    if len(str(extracted_value)) > 40:
+                        value_display += "..."
+                    display_text += f"\n   → {value_display}"
+            
+            item = QListWidgetItem(display_text)
             item.setData(Qt.UserRole, field_name)
             self.field_list.addItem(item)
         
         # Lägg till tabeller
         for table in self.current_template.table_mappings:
-            item = QListWidgetItem(f"✓ 📊 {table.table_name}")
+            display_text = f"✓ 📊 {table.table_name}"
+            # Visa antal kolumner och rader om extraherad data finns
+            if self.current_doc and self.current_doc.extracted_data:
+                table_data = self.current_doc.extracted_data.get("tables", {}).get(table.table_name, [])
+                if table_data:
+                    display_text += f"\n   → {len(table_data)} rader, {len(table.columns)} kolumner"
+            
+            item = QListWidgetItem(display_text)
             item.setData(Qt.UserRole, f"table:{table.table_name}")
             self.field_list.addItem(item)
     
@@ -546,7 +841,29 @@ class MappingTab(QWidget):
             ]
             self.current_template.field_mappings.append(field_mapping)
             
+            # Testa extraktion för att få värdet att visa
+            try:
+                result = self.extraction_engine.extract_data(
+                    self.current_doc.file_path,
+                    self.current_template
+                )
+                if result and "fields" in result:
+                    # Spara extraherade värden temporärt för visning
+                    if not self.current_doc.extracted_data:
+                        self.current_doc.extracted_data = {}
+                    if "fields" not in self.current_doc.extracted_data:
+                        self.current_doc.extracted_data["fields"] = {}
+                    self.current_doc.extracted_data["fields"][field_name] = result["fields"].get(field_name, extracted_value)
+            except Exception:
+                # Om extraktion misslyckas, använd det ursprungliga extraherade värdet
+                if not self.current_doc.extracted_data:
+                    self.current_doc.extracted_data = {}
+                if "fields" not in self.current_doc.extracted_data:
+                    self.current_doc.extracted_data["fields"] = {}
+                self.current_doc.extracted_data["fields"][field_name] = extracted_value
+            
             self._refresh_field_list()
+            self._update_mappings_display()
             self.status_label.setText(f"Fält '{field_name}' mappat! Extraherad text: {extracted_value[:50]}...")
     
     def _on_table_selected(self, rect: QRect):
@@ -600,7 +917,23 @@ class MappingTab(QWidget):
             ]
             
             self.current_template.table_mappings.append(table_mapping)
+            
+            # Testa extraktion för att få tabelldata att visa
+            try:
+                result = self.extraction_engine.extract_data(
+                    self.current_doc.file_path,
+                    self.current_template
+                )
+                if result and "tables" in result:
+                    # Spara extraherad data temporärt för visning
+                    if not self.current_doc.extracted_data:
+                        self.current_doc.extracted_data = {}
+                    self.current_doc.extracted_data["tables"] = result["tables"]
+            except Exception:
+                pass
+            
             self._refresh_field_list()
+            self._update_mappings_display()
             self.status_label.setText(
                 f"Tabell mappad! {len(column_mappings)} kolumner, {len(table_rows)} rader extraherade."
             )
@@ -656,6 +989,15 @@ class MappingTab(QWidget):
                     result_text += f"  {table_name}: {len(rows)} rader\n"
             else:
                 result_text += "  (Inga tabeller extraherade)\n"
+            
+            # Spara extraherad data temporärt för visning
+            if not self.current_doc.extracted_data:
+                self.current_doc.extracted_data = {}
+            self.current_doc.extracted_data.update(result)
+            
+            # Uppdatera visning
+            self._refresh_field_list()
+            self._update_mappings_display()
             
             QMessageBox.information(self, "Testresultat", result_text)
         except Exception as e:
