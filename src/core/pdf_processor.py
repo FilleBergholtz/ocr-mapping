@@ -10,8 +10,13 @@ from pdf2image import convert_from_path
 from PIL import Image
 import pytesseract
 import numpy as np
-from .logger import get_logger
+from .logger import get_logger, log_error_with_context
 from .cache import get_cache
+from .exceptions import (
+    PDFProcessingError,
+    OCRProcessingError,
+    DependencyNotFoundError
+)
 
 logger = get_logger()
 cache = get_cache()
@@ -109,8 +114,23 @@ class PDFProcessor:
             use_ocr: Om True, använd OCR även om PDF har text-lager
         
         Returns:
-            Extraherad text
+            Extraherad text (tom sträng om extraktion misslyckas)
+        
+        Raises:
+            PDFProcessingError: Om PDF inte kan läsas
+            OCRProcessingError: Om OCR misslyckas
+            DependencyNotFoundError: Om Tesseract eller Poppler saknas
         """
+        # Validera att filen existerar
+        if not os.path.exists(pdf_path):
+            error_msg = f"PDF-fil existerar inte: {pdf_path}"
+            logger.error(error_msg)
+            raise PDFProcessingError(
+                error_msg,
+                file_path=pdf_path,
+                user_message=f"Kunde inte hitta PDF-fil: '{pdf_path}'.\n\nKontrollera att filen existerar och att sökvägen är korrekt."
+            )
+        
         # Kolla cache först (endast om use_ocr=False, eftersom OCR kan variera)
         if not use_ocr:
             cached_text = cache.get_cached_text(pdf_path)
@@ -123,26 +143,69 @@ class PDFProcessor:
             
             # Om ingen text hittades eller use_ocr=True, använd OCR
             if not text.strip() or use_ocr:
-                ocr_text = self._extract_text_with_ocr(pdf_path)
-                if ocr_text:
-                    text = ocr_text
+                try:
+                    ocr_text = self._extract_text_with_ocr(pdf_path)
+                    if ocr_text:
+                        text = ocr_text
+                except DependencyNotFoundError:
+                    # Om OCR-kravs dependency saknas, returnera det som finns
+                    if text.strip():
+                        logger.warning(f"OCR misslyckades men text-lager hittades: {pdf_path}")
+                        return text
+                    # Annars låt exceptionen propagera
+                    raise
             
             # Cache texten (endast om use_ocr=False)
             if text and not use_ocr:
                 cache.cache_text(pdf_path, text)
             
             return text
+            
+        except (PDFProcessingError, OCRProcessingError, DependencyNotFoundError):
+            # Propagera custom exceptions
+            raise
         except Exception as e:
-            logger.error(f"Fel vid extraktion från {pdf_path}: {e}", exc_info=True)
-            return ""
+            log_error_with_context(
+                logger, e,
+                {"file_path": pdf_path, "use_ocr": use_ocr},
+                "Oväntat fel vid textextraktion"
+            )
+            raise PDFProcessingError(
+                f"Fel vid extraktion från PDF: {str(e)}",
+                file_path=pdf_path,
+                user_message=f"Kunde inte extrahera text från PDF: '{pdf_path}'.\n\nKontrollera att PDF:en är korruptfri."
+            ) from e
     
     def _extract_text_from_pdf(self, pdf_path: str) -> str:
-        """Extraherar text direkt från PDF (om text-lager finns)."""
+        """
+        Extraherar text direkt från PDF (om text-lager finns).
+        
+        Args:
+            pdf_path: Sökväg till PDF-fil
+        
+        Returns:
+            Extraherad text
+        
+        Raises:
+            PDFProcessingError: Om PDF inte kan läsas eller är korrupt
+        """
         text_parts = []
         
         try:
             with open(pdf_path, 'rb') as file:
-                pdf_reader = PyPDF2.PdfReader(file)
+                try:
+                    pdf_reader = PyPDF2.PdfReader(file)
+                except Exception as e:
+                    log_error_with_context(
+                        logger, e,
+                        {"file_path": pdf_path},
+                        "Fel vid läsning av PDF-struktur"
+                    )
+                    raise PDFProcessingError(
+                        f"PDF:en är korrupt eller kan inte läsas: {str(e)}",
+                        file_path=pdf_path,
+                        user_message=f"Kunde inte läsa PDF: '{pdf_path}'.\n\nKontrollera att PDF:en är korruptfri och inte lösenordsskyddad."
+                    ) from e
                 
                 for page_num, page in enumerate(pdf_reader.pages):
                     try:
@@ -150,31 +213,63 @@ class PDFProcessor:
                         if page_text:
                             text_parts.append(page_text)
                     except Exception as e:
-                        logger.warning(f"Fel vid läsning av sida {page_num}: {e}")
+                        log_error_with_context(
+                            logger, e,
+                            {"file_path": pdf_path, "page_num": page_num},
+                            f"Fel vid läsning av sida {page_num}"
+                        )
+                        # Fortsätt med nästa sida även om en sida misslyckas
         
+        except PDFProcessingError:
+            # Propagera PDFProcessingError
+            raise
         except Exception as e:
-            logger.error(f"Fel vid öppning av PDF: {e}", exc_info=True)
+            log_error_with_context(
+                logger, e,
+                {"file_path": pdf_path},
+                "Fel vid öppning av PDF"
+            )
+            raise PDFProcessingError(
+                f"Kunde inte öppna PDF: {str(e)}",
+                file_path=pdf_path,
+                user_message=f"Kunde inte öppna PDF: '{pdf_path}'.\n\nKontrollera att filen är tillgänglig och inte är låst."
+            ) from e
         
         return "\n".join(text_parts)
     
     def _extract_text_with_ocr(self, pdf_path: str) -> str:
-        """Extraherar text med OCR."""
+        """
+        Extraherar text med OCR.
+        
+        Args:
+            pdf_path: Sökväg till PDF-fil
+        
+        Returns:
+            Extraherad text via OCR
+        
+        Raises:
+            DependencyNotFoundError: Om Tesseract eller Poppler saknas
+            OCRProcessingError: Om OCR-bearbetning misslyckas
+        """
         if not self.tesseract_available:
-            error_msg = "Tesseract OCR är inte installerat eller hittades inte."
-            logger.error(error_msg)
-            raise RuntimeError(
-                f"{error_msg}\n"
-                "Installera Tesseract från: https://github.com/UB-Mannheim/tesseract/wiki\n"
-                "Eller ange sökväg till tesseract.exe i PDFProcessor.__init__()"
+            raise DependencyNotFoundError(
+                dependency_name="Tesseract OCR",
+                installation_guide=(
+                    "Installera Tesseract från: https://github.com/UB-Mannheim/tesseract/wiki\n"
+                    "Eller ange sökväg till tesseract.exe i PDFProcessor.__init__()"
+                ),
+                affected_features="OCR-funktionalitet för skannade PDF:er"
             )
         
         if not self.poppler_available:
-            error_msg = "Poppler är inte installerat eller hittades inte."
-            logger.error(error_msg)
-            raise RuntimeError(
-                f"{error_msg}\n"
-                "Installera Poppler från: https://github.com/oschwartz10612/poppler-windows/releases/\n"
-                "Extrahera till C:\\poppler och lägg till C:\\poppler\\Library\\bin till PATH"
+            raise DependencyNotFoundError(
+                dependency_name="Poppler",
+                installation_guide=(
+                    "Installera Poppler från: https://github.com/oschwartz10612/poppler-windows/releases/\n"
+                    "Extrahera till C:\\poppler och lägg till C:\\poppler\\Library\\bin till PATH\n\n"
+                    "Se INSTALL_POPPLER.md för detaljerade instruktioner."
+                ),
+                affected_features="PDF-till-bild konvertering (krävs för OCR)"
             )
         
         text_parts = []
@@ -182,29 +277,67 @@ class PDFProcessor:
         try:
             # Konvertera PDF till bilder
             # Använd poppler_path om det är konfigurerat
-            if self.poppler_path:
-                images = convert_from_path(
-                    pdf_path,
-                    dpi=300,
-                    poppler_path=self.poppler_path
-                )
-            else:
-                images = convert_from_path(pdf_path, dpi=300)
+            try:
+                if self.poppler_path:
+                    images = convert_from_path(
+                        pdf_path,
+                        dpi=300,
+                        poppler_path=self.poppler_path
+                    )
+                else:
+                    images = convert_from_path(pdf_path, dpi=300)
+            except Exception as e:
+                error_str = str(e).lower()
+                if "poppler" in error_str or "pdfinfo" in error_str:
+                    log_error_with_context(
+                        logger, e,
+                        {"file_path": pdf_path, "poppler_path": self.poppler_path},
+                        "Fel vid PDF-till-bild konvertering (Poppler)"
+                    )
+                    raise DependencyNotFoundError(
+                        dependency_name="Poppler",
+                        installation_guide=(
+                            "Installera Poppler från: https://github.com/oschwartz10612/poppler-windows/releases/\n"
+                            "Se INSTALL_POPPLER.md för detaljerade instruktioner."
+                        ),
+                        affected_features="PDF-till-bild konvertering"
+                    ) from e
+                else:
+                    raise
             
-            for image in images:
-                # Förbehandling för bättre OCR
-                processed_image = self._preprocess_image(image)
-                
-                # OCR med svenska och engelska
-                ocr_text = pytesseract.image_to_string(
-                    processed_image,
-                    lang='swe+eng'
-                )
-                text_parts.append(ocr_text)
+            for page_num, image in enumerate(images):
+                try:
+                    # Förbehandling för bättre OCR
+                    processed_image = self._preprocess_image(image)
+                    
+                    # OCR med svenska och engelska
+                    ocr_text = pytesseract.image_to_string(
+                        processed_image,
+                        lang='swe+eng'
+                    )
+                    text_parts.append(ocr_text)
+                except Exception as e:
+                    log_error_with_context(
+                        logger, e,
+                        {"file_path": pdf_path, "page_num": page_num},
+                        f"Fel vid OCR på sida {page_num}"
+                    )
+                    # Fortsätt med nästa sida även om OCR misslyckas på en sida
+                    logger.warning(f"Skippar sida {page_num} på grund av OCR-fel")
         
-        except Exception as e:
-            logger.error(f"Fel vid OCR: {e}", exc_info=True)
+        except (DependencyNotFoundError, OCRProcessingError):
+            # Propagera custom exceptions
             raise
+        except Exception as e:
+            log_error_with_context(
+                logger, e,
+                {"file_path": pdf_path},
+                "Oväntat fel vid OCR-bearbetning"
+            )
+            raise OCRProcessingError(
+                f"OCR misslyckades: {str(e)}",
+                file_path=pdf_path
+            ) from e
         
         return "\n".join(text_parts)
     
@@ -223,14 +356,38 @@ class PDFProcessor:
         return image
     
     def get_page_image(self, pdf_path: str, page_num: int = 0, dpi: int = 200) -> Optional[Image.Image]:
-        """Hämtar en sida som bild."""
+        """
+        Hämtar en sida som bild.
+        
+        Args:
+            pdf_path: Sökväg till PDF-fil
+            page_num: Sidnummer (0-indexerat)
+            dpi: Upplösning för bildkonvertering
+        
+        Returns:
+            PIL Image eller None om konvertering misslyckas
+        
+        Raises:
+            PDFProcessingError: Om PDF inte kan läsas
+            DependencyNotFoundError: Om Poppler saknas
+        """
+        # Validera att filen existerar
+        if not os.path.exists(pdf_path):
+            raise PDFProcessingError(
+                f"PDF-fil existerar inte: {pdf_path}",
+                file_path=pdf_path,
+                page_num=page_num,
+                user_message=f"Kunde inte hitta PDF-fil: '{pdf_path}'.\n\nKontrollera att filen existerar."
+            )
+        
         if not self.poppler_available:
-            error_msg = "Poppler är inte installerat eller hittades inte."
-            logger.error(error_msg)
-            raise RuntimeError(
-                f"{error_msg}\n"
-                "Installera Poppler från: https://github.com/oschwartz10612/poppler-windows/releases/\n"
-                "Extrahera till C:\\poppler och lägg till C:\\poppler\\Library\\bin till PATH"
+            raise DependencyNotFoundError(
+                dependency_name="Poppler",
+                installation_guide=(
+                    "Installera Poppler från: https://github.com/oschwartz10612/poppler-windows/releases/\n"
+                    "Se INSTALL_POPPLER.md för detaljerade instruktioner."
+                ),
+                affected_features="PDF-visualisering och PDF-till-bild konvertering"
             )
         
         # Kolla cache först
@@ -240,47 +397,131 @@ class PDFProcessor:
         
         try:
             # Använd poppler_path om det är konfigurerat
-            if self.poppler_path:
-                images = convert_from_path(
-                    pdf_path,
-                    first_page=page_num+1,
-                    last_page=page_num+1,
-                    dpi=dpi,
-                    poppler_path=self.poppler_path
-                )
-            else:
-                images = convert_from_path(
-                    pdf_path,
-                    first_page=page_num+1,
-                    last_page=page_num+1,
-                    dpi=dpi
-                )
+            try:
+                if self.poppler_path:
+                    images = convert_from_path(
+                        pdf_path,
+                        first_page=page_num+1,
+                        last_page=page_num+1,
+                        dpi=dpi,
+                        poppler_path=self.poppler_path
+                    )
+                else:
+                    images = convert_from_path(
+                        pdf_path,
+                        first_page=page_num+1,
+                        last_page=page_num+1,
+                        dpi=dpi
+                    )
+            except Exception as e:
+                error_str = str(e).lower()
+                if "poppler" in error_str or "pdfinfo" in error_str:
+                    log_error_with_context(
+                        logger, e,
+                        {"file_path": pdf_path, "page_num": page_num, "poppler_path": self.poppler_path},
+                        "Fel vid PDF-till-bild konvertering (Poppler)"
+                    )
+                    raise DependencyNotFoundError(
+                        dependency_name="Poppler",
+                        installation_guide=(
+                            "Installera Poppler från: https://github.com/oschwartz10612/poppler-windows/releases/\n"
+                            "Se INSTALL_POPPLER.md för detaljerade instruktioner."
+                        ),
+                        affected_features="PDF-visualisering"
+                    ) from e
+                else:
+                    raise
+            
             if images:
                 image = images[0]
                 # Cache bilden
                 cache.cache_image(pdf_path, page_num, image, dpi)
                 return image
-        except Exception as e:
-            error_msg = f"Fel vid konvertering av sida {page_num}: {e}"
-            logger.error(error_msg, exc_info=True)
-            if "poppler" in str(e).lower():
-                tip_msg = (
-                    "TIP: Installera Poppler från https://github.com/oschwartz10612/poppler-windows/releases/\n"
-                    "     Extrahera till C:\\poppler och lägg till C:\\poppler\\Library\\bin till PATH"
-                )
-                logger.warning(tip_msg)
-                raise RuntimeError(f"{error_msg}\n{tip_msg}") from e
+            
+            # Ingen bild returnerades
+            log_error_with_context(
+                logger, None,
+                {"file_path": pdf_path, "page_num": page_num},
+                "Ingen bild returnerades vid konvertering"
+            )
+            return None
+            
+        except (PDFProcessingError, DependencyNotFoundError):
+            # Propagera custom exceptions
             raise
-        return None
+        except Exception as e:
+            log_error_with_context(
+                logger, e,
+                {"file_path": pdf_path, "page_num": page_num},
+                f"Oväntat fel vid konvertering av sida {page_num}"
+            )
+            raise PDFProcessingError(
+                f"Kunde inte konvertera sida {page_num + 1} till bild: {str(e)}",
+                file_path=pdf_path,
+                page_num=page_num,
+                user_message=f"Kunde inte konvertera PDF-sida till bild.\n\nKontrollera att PDF:en kan läsas korrekt."
+            ) from e
     
     def get_pdf_dimensions(self, pdf_path: str) -> Optional[Tuple[float, float]]:
-        """Hämtar PDF-dimensioner (width, height i points)."""
+        """
+        Hämtar PDF-dimensioner (width, height i points).
+        
+        Args:
+            pdf_path: Sökväg till PDF-fil
+        
+        Returns:
+            Tuple med (width, height) i points, eller None om fel
+        
+        Raises:
+            PDFProcessingError: Om PDF inte kan läsas
+        """
+        # Validera att filen existerar
+        if not os.path.exists(pdf_path):
+            log_error_with_context(
+                logger, None,
+                {"file_path": pdf_path},
+                "PDF-fil existerar inte vid hämtning av dimensioner"
+            )
+            raise PDFProcessingError(
+                f"PDF-fil existerar inte: {pdf_path}",
+                file_path=pdf_path,
+                user_message=f"Kunde inte hitta PDF-fil: '{pdf_path}'.\n\nKontrollera att filen existerar."
+            )
+        
         try:
             with open(pdf_path, 'rb') as file:
-                pdf_reader = PyPDF2.PdfReader(file)
-                if pdf_reader.pages:
-                    page = pdf_reader.pages[0]
-                    return (float(page.mediabox.width), float(page.mediabox.height))
+                try:
+                    pdf_reader = PyPDF2.PdfReader(file)
+                except Exception as e:
+                    log_error_with_context(
+                        logger, e,
+                        {"file_path": pdf_path},
+                        "Fel vid läsning av PDF-struktur (dimensioner)"
+                    )
+                    raise PDFProcessingError(
+                        f"PDF:en är korrupt eller kan inte läsas: {str(e)}",
+                        file_path=pdf_path,
+                        user_message=f"Kunde inte läsa PDF-dimensioner från '{pdf_path}'.\n\nKontrollera att PDF:en är korruptfri."
+                    ) from e
+                
+                if not pdf_reader.pages:
+                    logger.warning(f"PDF har inga sidor: {pdf_path}")
+                    return None
+                
+                page = pdf_reader.pages[0]
+                return (float(page.mediabox.width), float(page.mediabox.height))
+                
+        except PDFProcessingError:
+            # Propagera PDFProcessingError
+            raise
         except Exception as e:
-            logger.error(f"Fel vid läsning av PDF-dimensioner: {e}", exc_info=True)
-        return None
+            log_error_with_context(
+                logger, e,
+                {"file_path": pdf_path},
+                "Oväntat fel vid läsning av PDF-dimensioner"
+            )
+            raise PDFProcessingError(
+                f"Kunde inte läsa PDF-dimensioner: {str(e)}",
+                file_path=pdf_path,
+                user_message=f"Kunde inte läsa PDF-dimensioner från '{pdf_path}'.\n\nKontrollera att PDF:en kan läsas korrekt."
+            ) from e
