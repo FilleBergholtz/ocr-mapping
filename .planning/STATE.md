@@ -64,6 +64,7 @@
 ## Next Steps
 
 1. ✅ Phase 1 completion verified (VERIFICATION.md created)
-2. ✅ Phase 2 - Plan 01 executed and completed
-3. Plan Phase 2 - Plan 02: OCR-förbättringar (nästa hög prioritet)
-4. Eller: Ytterligare förbättringar i tabellmappning om behov uppstår
+2. ✅ Phase 2 - Plan 01 executed and completed (Tabellmappning-förbättringar)
+3. ✅ Phase 2 - Plan 02 executed and completed (OCR-förbättringar)
+4. Plan Phase 2 - Plan 03: Smart fältdetektering (nästa hög prioritet)
+5. Eller: Ytterligare förbättringar om behov uppstår
