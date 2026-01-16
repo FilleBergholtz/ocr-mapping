@@ -29,6 +29,7 @@ class TableMappingDialog(QDialog):
         self._setup_ui()
         self._populate_table()
         self._detect_header_row()
+        self._update_preview()  # Initial förhandsgranskning
     
     def _setup_ui(self):
         """Skapar UI."""
@@ -94,6 +95,25 @@ class TableMappingDialog(QDialog):
         mapping_group.setLayout(mapping_layout)
         layout.addWidget(mapping_group)
         
+        # Förhandsgranskning av extraherad tabell
+        preview_group = QGroupBox("Förhandsgranskning - Extraherad tabell")
+        preview_layout = QVBoxLayout()
+        
+        preview_info = QLabel(
+            "Förhandsgranskning av hur tabellen kommer att extraheras baserat på nuvarande mappning."
+        )
+        preview_info.setWordWrap(True)
+        preview_layout.addWidget(preview_info)
+        
+        self.preview_table = QTableWidget()
+        self.preview_table.setAlternatingRowColors(True)
+        self.preview_table.setMaximumHeight(200)
+        self.preview_table.horizontalHeader().setStretchLastSection(True)
+        preview_layout.addWidget(self.preview_table)
+        
+        preview_group.setLayout(preview_layout)
+        layout.addWidget(preview_group)
+        
         # Knappar
         button_layout = QHBoxLayout()
         self.ok_btn = QPushButton("OK")
@@ -144,11 +164,72 @@ class TableMappingDialog(QDialog):
                     else:
                         col_input.setPlaceholderText(f"T.ex. '{suggested_name[:30]}'")
             
+            # Koppla signal för att uppdatera förhandsgranskning när kolumnnamn ändras
+            col_input.textChanged.connect(self._update_preview)
+            
             self.column_inputs.append(col_input)
             row_layout.addWidget(col_input)
             row_layout.addStretch()
             
             self.column_names_layout.addLayout(row_layout)
+    
+    def _validate_table_structure(self) -> List[str]:
+        """
+        Validerar tabellstrukturen och returnerar varningar.
+        
+        Returns:
+            Lista med varningsmeddelanden (tom lista om inga varningar)
+        """
+        warnings = []
+        
+        if not self.table_rows:
+            warnings.append("Inga tabellrader extraherade. Kontrollera att tabellområdet är korrekt markerat.")
+            return warnings
+        
+        # Hämta nuvarande kolumnmappningar
+        current_mappings = []
+        for col_idx, col_input in enumerate(self.column_inputs):
+            col_name = col_input.text().strip()
+            if col_name:
+                current_mappings.append({
+                    "index": col_idx,
+                    "name": col_name
+                })
+        
+        if not current_mappings:
+            return warnings  # Detta hanteras redan i _validate_and_accept
+        
+        # Validering 1: Kontrollera att alla mappade kolumner finns i tabellen
+        max_cols = max(len(row) for row in self.table_rows) if self.table_rows else 0
+        for col_mapping in current_mappings:
+            col_index = col_mapping.get("index", 0)
+            if col_index >= max_cols:
+                warnings.append(f"Kolumn '{col_mapping.get('name')}' har index {col_index} men tabellen har endast {max_cols} kolumner.")
+        
+        # Validering 2: Kontrollera att kolumner inte är för nära varandra (misstänkt split-fel)
+        col_indices = sorted([cm.get("index", 0) for cm in current_mappings])
+        for i in range(len(col_indices) - 1):
+            if col_indices[i+1] - col_indices[i] == 1:
+                warnings.append(f"Kolumner {col_indices[i]} och {col_indices[i+1]} är intill varandra. Kontrollera att kolumner är korrekt separerade.")
+        
+        # Validering 3: Kontrollera tabellstruktur (samma antal kolumner per rad)
+        if len(self.table_rows) > 1:
+            col_counts = [len(row) for row in self.table_rows]
+            unique_counts = set(col_counts)
+            if len(unique_counts) > 1:
+                warnings.append(f"Tabellen har inkonsekvent struktur: olika antal kolumner per rad ({min(unique_counts)}-{max(unique_counts)} kolumner).")
+        
+        # Validering 4: Kontrollera om header-rad förväntas men inte hittas
+        if self.has_header_checkbox.isChecked():
+            header_row_idx = self.header_row_spinbox.value()
+            if header_row_idx < 0 or header_row_idx >= len(self.table_rows):
+                warnings.append("Header-rad angiven men ligger utanför tabellområdet.")
+        
+        # Validering 5: Kontrollera att mappade kolumner finns i förhandsgranskning
+        if hasattr(self, 'preview_table') and self.preview_table.rowCount() == 0:
+            warnings.append("Ingen data extraheras enligt förhandsgranskning. Kontrollera att mappningen är korrekt.")
+        
+        return warnings
     
     def _validate_and_accept(self):
         """Validerar och accepterar dialog."""
@@ -170,6 +251,26 @@ class TableMappingDialog(QDialog):
                 "Du måste ange minst ett kolumnnamn."
             )
             return
+        
+        # Validera tabellstruktur
+        warnings = self._validate_table_structure()
+        
+        # Om det finns varningar, visa dem men tillåt användaren att fortsätta
+        if warnings:
+            warning_text = "Varningar vid validering av tabellstruktur:\n\n"
+            warning_text += "\n".join(f"• {w}" for w in warnings)
+            warning_text += "\n\nVill du fortsätta ändå?"
+            
+            reply = QMessageBox.warning(
+                self,
+                "Tabellvalidering - Varningar",
+                warning_text,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            
+            if reply == QMessageBox.No:
+                return
         
         self.accept()
     
@@ -296,3 +397,74 @@ class TableMappingDialog(QDialog):
                     if item:
                         item.setBackground(QColor(255, 255, 255))
                         item.setForeground(QColor(0, 0, 0))
+    
+    def _update_preview(self):
+        """Uppdaterar förhandsgranskning av extraherad tabell."""
+        if not self.table_rows:
+            self.preview_table.setRowCount(0)
+            self.preview_table.setColumnCount(0)
+            return
+        
+        # Hämta nuvarande kolumnmappningar
+        current_mappings = []
+        for col_idx, col_input in enumerate(self.column_inputs):
+            col_name = col_input.text().strip()
+            if col_name:
+                current_mappings.append({
+                    "index": col_idx,
+                    "name": col_name
+                })
+        
+        if not current_mappings:
+            self.preview_table.setRowCount(0)
+            self.preview_table.setColumnCount(0)
+            return
+        
+        # Bestäm start-rad (skip header om det finns)
+        start_row = 0
+        if self.has_header_checkbox.isChecked():
+            header_row_idx = self.header_row_spinbox.value()
+            if header_row_idx >= 0:
+                start_row = header_row_idx + 1
+        
+        # Skapa förhandsgranskning baserat på mappningar
+        data_rows = []
+        for row_idx in range(start_row, len(self.table_rows)):
+            row_data = {}
+            for col_mapping in current_mappings:
+                col_index = col_mapping.get("index", 0)
+                col_name = col_mapping.get("name", "")
+                if col_index < len(self.table_rows[row_idx]):
+                    cell_value = self.table_rows[row_idx][col_index].strip()
+                    row_data[col_name] = cell_value
+                else:
+                    row_data[col_name] = ""
+            
+            # Lägg till rad om den inte är helt tom
+            if any(row_data.values()):
+                data_rows.append(row_data)
+        
+        # Uppdatera preview-tabell
+        self.preview_table.setColumnCount(len(current_mappings))
+        self.preview_table.setRowCount(len(data_rows))
+        
+        # Sätt kolumnnamn
+        column_names = [cm["name"] for cm in current_mappings]
+        self.preview_table.setHorizontalHeaderLabels(column_names)
+        
+        # Fyll i data med färgkodning
+        for row_idx, row_data in enumerate(data_rows):
+            for col_idx, col_name in enumerate(column_names):
+                cell_value = row_data.get(col_name, "")
+                item = QTableWidgetItem(cell_value)
+                
+                # Färgkoda baserat på status
+                if not cell_value:
+                    # Tom cell - gul bakgrund (varning)
+                    item.setBackground(QColor(255, 255, 200))
+                else:
+                    # OK cell - vit bakgrund
+                    item.setBackground(QColor(255, 255, 255))
+                
+                item.setForeground(QColor(0, 0, 0))
+                self.preview_table.setItem(row_idx, col_idx, item)

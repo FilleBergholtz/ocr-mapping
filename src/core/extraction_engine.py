@@ -303,6 +303,12 @@ class ExtractionEngine:
             logger.warning(f"Table mapping '{table_mapping.table_name}' saknar kolumner")
             return []
         
+        # Ytterligare validering av tabellstruktur
+        validation_warnings = self._validate_table_mapping(text, lines, table_mapping, pdf_path)
+        if validation_warnings:
+            for warning in validation_warnings:
+                logger.warning(f"Tabellvalidering - {warning}")
+        
         # Validera koordinater om de finns
         if table_mapping.table_coords:
             coords = table_mapping.table_coords
@@ -373,3 +379,71 @@ class ExtractionEngine:
             )
             # Returnera tom lista istället för att krascha - partial results
             return []
+    
+    def _validate_table_mapping(
+        self,
+        text: str,
+        lines: List[str],
+        table_mapping: TableMapping,
+        pdf_path: str
+    ) -> List[str]:
+        """
+        Validerar tabellmappning och returnerar varningar.
+        
+        Args:
+            text: Extraherad text från PDF
+            lines: Text raderad i linjer
+            table_mapping: Tabellmappning att validera
+            pdf_path: Sökväg till PDF-fil (för logging)
+        
+        Returns:
+            Lista med varningsmeddelanden (tom lista om inga varningar)
+        """
+        warnings = []
+        
+        if not table_mapping or not table_mapping.columns:
+            return warnings
+        
+        # Validering 1: Kontrollera att alla kolumnindices är rimliga
+        max_expected_cols = max(col_mapping.get("index", 0) + 1 for col_mapping in table_mapping.columns)
+        
+        # Validering 2: Kontrollera tabellstruktur (samma antal kolumner per rad)
+        table_lines = []
+        for line in lines:
+            parts = re.split(r'\s{2,}|\t', line.strip())
+            if len(parts) >= len(table_mapping.columns):
+                table_lines.append(parts)
+        
+        if table_lines:
+            col_counts = [len(parts) for parts in table_lines]
+            unique_counts = set(col_counts)
+            if len(unique_counts) > 1:
+                warnings.append(
+                    f"Tabellen har inkonsekvent struktur: olika antal kolumner per rad "
+                    f"({min(unique_counts)}-{max(unique_counts)} kolumner)."
+                )
+            
+            # Kontrollera att kolumnindices inte är utanför tabellstrukturen
+            max_actual_cols = max(col_counts) if col_counts else 0
+            for col_mapping in table_mapping.columns:
+                col_index = col_mapping.get("index", 0)
+                if col_index >= max_actual_cols:
+                    warnings.append(
+                        f"Kolumn '{col_mapping.get('name')}' har index {col_index} "
+                        f"men tabellen har endast {max_actual_cols} kolumner."
+                    )
+        
+        # Validering 3: Kontrollera att header-rad finns om den förväntas
+        if table_mapping.has_header_row and not table_lines:
+            warnings.append("Header-rad förväntas men inga tabellrader hittades.")
+        
+        # Validering 4: Kontrollera att kolumner inte är för nära varandra
+        col_indices = sorted([cm.get("index", 0) for cm in table_mapping.columns])
+        for i in range(len(col_indices) - 1):
+            if col_indices[i+1] - col_indices[i] == 1:
+                warnings.append(
+                    f"Kolumner med index {col_indices[i]} och {col_indices[i+1]} är intill varandra. "
+                    "Kontrollera att kolumner är korrekt separerade."
+                )
+        
+        return warnings
