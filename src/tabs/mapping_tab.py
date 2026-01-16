@@ -893,12 +893,15 @@ class MappingTab(QWidget):
                 "height": rect.height() / 1000.0
             }
             
+            # Använd språk från template om tillgängligt
+            ocr_language = getattr(self.current_template, 'ocr_language', 'swe+eng') if self.current_template else 'swe+eng'
             extracted_value = self.text_extractor.extract_text_from_region(
                 self.current_doc.file_path,
                 0,
                 coords,
                 self.pdf_dimensions[0],
-                self.pdf_dimensions[1]
+                self.pdf_dimensions[1],
+                language=ocr_language
             )
         except Exception as e:
             log_error_with_context(
@@ -1020,12 +1023,15 @@ class MappingTab(QWidget):
                 "height": rect.height() / 1000.0
             }
             
+            # Använd språk från template om tillgängligt
+            ocr_language = getattr(self.current_template, 'ocr_language', 'swe+eng') if self.current_template else 'swe+eng'
             table_rows = self.text_extractor.extract_table_text(
                 self.current_doc.file_path,
                 0,
                 table_coords,
                 self.pdf_dimensions[0],
-                self.pdf_dimensions[1]
+                self.pdf_dimensions[1],
+                language=ocr_language
             )
         except Exception as e:
             log_error_with_context(

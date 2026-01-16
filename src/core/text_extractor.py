@@ -24,7 +24,8 @@ class TextExtractor:
         page_num: int,
         coords: dict,
         pdf_width: float,
-        pdf_height: float
+        pdf_height: float,
+        language: str = "swe+eng"
     ) -> str:
         """
         Extraherar text från ett specifikt område i PDF:en.
@@ -56,8 +57,8 @@ class TextExtractor:
             # Klipp ut området
             region = pdf_image.crop((x, y, x + width, y + height))
             
-            # OCR på området
-            text = pytesseract.image_to_string(region, lang='swe+eng')
+            # OCR på området med angivet språk
+            text = pytesseract.image_to_string(region, lang=language)
             return text.strip()
         
         except Exception as e:
@@ -70,7 +71,8 @@ class TextExtractor:
         page_num: int,
         table_coords: dict,
         pdf_width: float,
-        pdf_height: float
+        pdf_height: float,
+        language: str = "swe+eng"
     ) -> list:
         """
         Extraherar text från ett tabellområde, rad för rad.
@@ -95,8 +97,8 @@ class TextExtractor:
             # Klipp ut tabellområdet
             table_region = pdf_image.crop((x, y, x + width, y + height))
             
-            # OCR på hela tabellen
-            text = pytesseract.image_to_string(table_region, lang='swe+eng')
+            # OCR på hela tabellen med angivet språk
+            text = pytesseract.image_to_string(table_region, lang=language)
             
             # Dela upp i rader
             lines = text.split('\n')

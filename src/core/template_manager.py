@@ -40,12 +40,14 @@ class Template:
     reference_file: str
     field_mappings: List[FieldMapping] = field(default_factory=list)
     table_mappings: List[TableMapping] = field(default_factory=list)
+    ocr_language: str = "swe+eng"  # Tesseract language code (default: svenska + engelska)
     
     def to_dict(self) -> Dict:
         """Konverterar till dictionary."""
         return {
             "cluster_id": self.cluster_id,
             "reference_file": self.reference_file,
+            "ocr_language": self.ocr_language,
             "field_mappings": [
                 asdict(fm) for fm in self.field_mappings
             ],
@@ -79,6 +81,7 @@ class Template:
         return cls(
             cluster_id=data["cluster_id"],
             reference_file=data["reference_file"],
+            ocr_language=data.get("ocr_language", "swe+eng"),  # Bakåtkompatibilitet: default till swe+eng
             field_mappings=field_mappings,
             table_mappings=table_mappings
         )

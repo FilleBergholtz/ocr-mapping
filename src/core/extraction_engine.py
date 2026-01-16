@@ -67,10 +67,16 @@ class ExtractionEngine:
                 "raw_text": ""
             }
         
-        # Extrahera text
+        # Extrahera text med språk från template (om tillgängligt)
+        ocr_language = getattr(template, 'ocr_language', 'swe+eng')
         try:
-            text = self.pdf_processor.extract_text(pdf_path)
+            text = self.pdf_processor.extract_text(pdf_path, use_ocr=False)
             lines = text.split('\n')
+            
+            # Om ingen text hittades, använd OCR med template-språk
+            if not text.strip():
+                text = self.pdf_processor.extract_text(pdf_path, use_ocr=True, language=ocr_language)
+                lines = text.split('\n')
         except Exception as e:
             log_error_with_context(
                 logger, e,
