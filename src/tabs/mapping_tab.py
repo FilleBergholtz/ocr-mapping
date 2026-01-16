@@ -1122,6 +1122,23 @@ class MappingTab(QWidget):
             )
             return
         
+        # Visa varning om inga rader extraherades
+        if not table_rows:
+            reply = QMessageBox.warning(
+                self,
+                "Ingen text extraherad",
+                "Ingen text kunde extraheras från det markerade området.\n\n"
+                "Möjliga orsaker:\n"
+                "- Området innehåller ingen text\n"
+                "- OCR misslyckades (kontrollera att Tesseract är installerat)\n"
+                "- Bildkvaliteten är för låg\n\n"
+                "Vill du ändå öppna tabellmappningsdialogen för att manuellt ange kolumner?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.No:
+                return
+        
         # Öppna dialog för kolumnmappning
         dialog = TableMappingDialog(self, table_rows=table_rows)
         if dialog.exec():

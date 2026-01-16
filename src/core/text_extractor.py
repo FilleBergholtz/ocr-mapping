@@ -97,8 +97,26 @@ class TextExtractor:
             # Klipp ut tabellområdet
             table_region = pdf_image.crop((x, y, x + width, y + height))
             
+            # Förbehandla bilden för bättre OCR-resultat
+            # Använd PDFProcessor's förbehandling om tillgänglig
+            try:
+                processed_image = self.pdf_processor._preprocess_image(
+                    table_region,
+                    enable_adaptive_threshold=True,
+                    enable_noise_reduction=True,
+                    enable_contrast_enhancement=True,
+                    enable_skew_correction=False  # Skew correction kan vara för aggressiv för små områden
+                )
+            except Exception:
+                # Om förbehandling misslyckas, använd originalbild
+                processed_image = table_region
+            
             # OCR på hela tabellen med angivet språk
-            text = pytesseract.image_to_string(table_region, lang=language)
+            text = pytesseract.image_to_string(processed_image, lang=language)
+            
+            if not text or not text.strip():
+                logger.warning(f"Ingen text extraherad från tabellområde vid koordinater: {table_coords}")
+                return []
             
             # Dela upp i rader
             lines = text.split('\n')
@@ -106,10 +124,23 @@ class TextExtractor:
             for line in lines:
                 line = line.strip()
                 if line:
-                    # Försök identifiera kolumner (flera mellanslag eller tabs)
-                    columns = re.split(r'\s{2,}|\t', line)
-                    if len(columns) > 1:
+                    # Försök identifiera kolumner (flera mellanslag, tabs, eller lodräta linjer)
+                    # Testa olika separationsmönster
+                    columns = re.split(r'\s{2,}|\t', line)  # Flera mellanslag eller tabs
+                    
+                    # Om inga kolumner hittas med flera mellanslag, försök med enkla mellanslag
+                    if len(columns) == 1:
+                        # Försök med enkla mellanslag för rader som ser ut som tabellrader
+                        columns = line.split()
+                        # Om raden ser ut som tabell-data (blandning av text och siffror), behandla varje ord som kolumn
+                        if len(columns) >= 2:
+                            rows.append([col.strip() for col in columns])
+                    else:
+                        # Flera kolumner hittades med flera mellanslag/tabs
                         rows.append([col.strip() for col in columns])
+            
+            if not rows:
+                logger.warning(f"Inga rader extraherade från tabellområde. Extraherad text: '{text[:100]}...'")
             
             return rows
         
