@@ -1,0 +1,30 @@
+# OCR PDF - Python Dependencies
+# Windows Desktop Application för automatisk extraktion av strukturerad data från fakturor
+
+# GUI Framework
+PySide6>=6.6.0,<7.0.0
+
+# PDF Processing
+PyPDF2>=3.0.0,<4.0.0
+pdf2image>=1.16.3,<2.0.0
+
+# OCR (Optical Character Recognition)
+# OBS: Kräver Tesseract OCR installerat separat på systemet
+# Ladda ner från: https://github.com/UB-Mannheim/tesseract/wiki
+pytesseract>=0.3.10,<1.0.0
+
+# Image Processing
+Pillow>=10.0.0,<11.0.0
+
+# Machine Learning & Data Processing
+numpy>=1.24.0,<2.0.0
+scikit-learn>=1.3.0,<2.0.0
+scipy>=1.11.0,<2.0.0
+
+# Data Export
+pandas>=2.0.0,<3.0.0
+openpyxl>=3.1.0,<4.0.0
+
+# System Requirements (inte Python-paket, måste installeras separat):
+# - Tesseract OCR: https://github.com/UB-Mannheim/tesseract/wiki
+# - Poppler (för pdf2image på Windows): https://github.com/oschwartz10612/poppler-windows/releases/
