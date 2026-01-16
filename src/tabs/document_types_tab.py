@@ -8,11 +8,21 @@ from PySide6.QtWidgets import (
     QGroupBox, QTextEdit
 )
 from PySide6.QtCore import Qt, Signal, QThread
+from PySide6.QtGui import QColor
 from typing import List
 from ..core.document_manager import DocumentManager, PDFDocument
 from ..core.clustering_engine import ClusteringEngine
 from ..core.template_manager import TemplateManager
-from ..core.pdf_processor import PDFProcessor
+from ..core.pdf_processor import (
+    PDFProcessor,
+    check_tesseract_available,
+    check_poppler_available,
+    get_tesseract_installation_guide,
+    get_poppler_installation_guide
+)
+from ..core.logger import get_logger
+
+logger = get_logger()
 
 
 class ProcessingThread(QThread):
@@ -78,7 +88,13 @@ class DocumentTypesTab(QWidget):
         self.template_manager = template_manager
         self.pdf_processor = PDFProcessor()
         
+        # Kontrollera dependencies
+        self.tesseract_available, _ = check_tesseract_available()
+        self.poppler_available, _ = check_poppler_available()
+        self._dependency_warning_shown = False
+        
         self._setup_ui()
+        self._update_dependency_status()
         self.refresh_clusters()
     
     def _setup_ui(self):
@@ -124,6 +140,19 @@ class DocumentTypesTab(QWidget):
         cluster_group.setLayout(cluster_layout)
         layout.addWidget(cluster_group)
         
+        # Dependency status
+        self.dependency_status = QGroupBox("Systemstatus")
+        dependency_layout = QVBoxLayout()
+        
+        self.dependency_info = QTextEdit()
+        self.dependency_info.setReadOnly(True)
+        self.dependency_info.setMaximumHeight(120)
+        self.dependency_info.setStyleSheet("background-color: #f5f5f5; font-size: 11px;")
+        dependency_layout.addWidget(self.dependency_info)
+        
+        self.dependency_status.setLayout(dependency_layout)
+        layout.addWidget(self.dependency_status)
+        
         # Status
         self.status_label = QLabel("Inga PDF:er laddade")
         layout.addWidget(self.status_label)
@@ -140,6 +169,7 @@ class DocumentTypesTab(QWidget):
         if file_paths:
             docs = self.document_manager.add_documents(file_paths)
             self.status_label.setText(f"{len(docs)} PDF:er laddade. Klicka 'Skanna' för att börja.")
+            # Enable scan button även om Poppler saknas (textbaserade PDF:er fungerar)
             self.scan_btn.setEnabled(True)
     
     def _scan_documents(self):
@@ -246,3 +276,56 @@ class DocumentTypesTab(QWidget):
         
         if not clusters:
             self.status_label.setText("Inga kluster. Lägg till PDF:er och klicka 'Skanna'.")
+    
+    def _update_dependency_status(self):
+        """Uppdaterar dependency status i UI."""
+        status_lines = []
+        
+        # Tesseract status
+        if self.tesseract_available:
+            status_lines.append("✓ Tesseract OCR: Installerad och tillgänglig")
+        else:
+            status_lines.append("⚠ Tesseract OCR: Saknas - OCR-funktionalitet kommer inte att fungera")
+            status_lines.append("   Textbaserade PDF:er fungerar fortfarande")
+        
+        status_lines.append("")  # Tom rad
+        
+        # Poppler status
+        if self.poppler_available:
+            status_lines.append("✓ Poppler: Installerad och tillgänglig")
+        else:
+            status_lines.append("⚠ Poppler: Saknas - PDF-visualisering kommer inte att fungera")
+            status_lines.append("   PDF-extraktion från text-lager fungerar fortfarande")
+        
+        self.dependency_info.setText("\n".join(status_lines))
+        
+        # Varna användaren om dependencies saknas (endast första gången)
+        if not self._dependency_warning_shown and (not self.tesseract_available or not self.poppler_available):
+            self._dependency_warning_shown = True
+            missing = []
+            if not self.tesseract_available:
+                missing.append("Tesseract OCR")
+            if not self.poppler_available:
+                missing.append("Poppler")
+            
+            warning_msg = (
+                f"Varning: Följande dependencies saknas: {', '.join(missing)}\n\n"
+            )
+            
+            if not self.tesseract_available:
+                warning_msg += "Tesseract OCR: " + get_tesseract_installation_guide() + "\n\n"
+            
+            if not self.poppler_available:
+                warning_msg += "Poppler: " + get_poppler_installation_guide() + "\n\n"
+            
+            warning_msg += (
+                "Applikationen fungerar fortfarande med textbaserade PDF:er, "
+                "men vissa funktioner kommer inte att vara tillgängliga.\n\n"
+                "Klicka 'OK' för att fortsätta eller stäng denna dialog."
+            )
+            
+            QMessageBox.warning(
+                self,
+                "Saknade Dependencies",
+                warning_msg
+            )

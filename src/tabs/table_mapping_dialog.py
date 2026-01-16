@@ -22,6 +22,7 @@ class TableMappingDialog(QDialog):
         
         self.table_rows = table_rows or []
         self.column_mappings: List[Dict] = []
+        self.column_inputs: List = []  # Initialisera tidigt för att undvika AttributeError
         
         self._setup_ui()
         self._populate_table()

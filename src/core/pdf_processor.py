@@ -21,6 +21,144 @@ from .exceptions import (
 logger = get_logger()
 cache = get_cache()
 
+# Cache för dependency-checks (klassvariabel)
+_tesseract_checked: Optional[bool] = None
+_tesseract_path: Optional[str] = None
+_poppler_checked: Optional[bool] = None
+_poppler_path: Optional[str] = None
+
+
+def check_tesseract_available(tesseract_cmd: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+    """
+    Kontrollerar om Tesseract OCR är tillgängligt.
+    
+    Args:
+        tesseract_cmd: Sökväg till tesseract executable (optional)
+    
+    Returns:
+        Tuple med (is_available, tesseract_path)
+    """
+    global _tesseract_checked, _tesseract_path
+    
+    # Om redan kontrollerad, returnera cached värde
+    if _tesseract_checked is not None and tesseract_cmd is None:
+        return _tesseract_checked, _tesseract_path
+    
+    found_path = None
+    
+    # Om explicit sökväg angiven
+    if tesseract_cmd:
+        if os.path.exists(tesseract_cmd):
+            pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+            found_path = tesseract_cmd
+            _tesseract_checked = True
+            _tesseract_path = found_path
+            return True, found_path
+    else:
+        # Försök hitta automatiskt
+        possible_paths = [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        ]
+        for path in possible_paths:
+            if os.path.exists(path):
+                pytesseract.pytesseract.tesseract_cmd = path
+                found_path = path
+                break
+    
+    # Verifiera att Tesseract fungerar
+    try:
+        pytesseract.get_tesseract_version()
+        _tesseract_checked = True
+        _tesseract_path = found_path
+        return True, found_path
+    except Exception:
+        _tesseract_checked = False
+        _tesseract_path = None
+        return False, None
+
+
+def check_poppler_available(poppler_path: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+    """
+    Kontrollerar om Poppler är tillgängligt.
+    
+    Args:
+        poppler_path: Sökväg till Poppler bin-mapp (optional)
+    
+    Returns:
+        Tuple med (is_available, poppler_path)
+    """
+    global _poppler_checked, _poppler_path
+    
+    # Om redan kontrollerad, returnera cached värde
+    if _poppler_checked is not None and poppler_path is None:
+        return _poppler_checked, _poppler_path
+    
+    found_path = None
+    
+    # Om explicit sökväg angiven
+    if poppler_path:
+        poppler_bin = Path(poppler_path)
+        if poppler_bin.exists():
+            os.environ["PATH"] = str(poppler_bin) + os.pathsep + os.environ.get("PATH", "")
+            found_path = poppler_path
+            _poppler_checked = True
+            _poppler_path = found_path
+            return True, found_path
+    else:
+        # Försök hitta automatiskt
+        possible_poppler_paths = [
+            r"C:\poppler\Library\bin",
+            r"C:\Program Files\poppler\Library\bin",
+            r"C:\Program Files (x86)\poppler\Library\bin",
+        ]
+        for path in possible_poppler_paths:
+            if os.path.exists(path):
+                os.environ["PATH"] = path + os.pathsep + os.environ.get("PATH", "")
+                found_path = path
+                break
+    
+    # Verifiera att Poppler fungerar genom att testa om pdf2image kan använda det
+    # Om found_path är None, försök använda system PATH
+    if found_path:
+        # Om vi hittat en sökväg, antag att Poppler fungerar
+        # (verklig verifiering skulle kräva att vi försöker konvertera en PDF, vilket är dyrt)
+        _poppler_checked = True
+        _poppler_path = found_path
+        return True, found_path
+    else:
+        # Ingen sökväg hittades, kontrollera om pdf2image kan hitta Poppler via PATH
+        # Detta är en heuristisk kontroll - verklig verifiering kräver faktisk konvertering
+        _poppler_checked = False
+        _poppler_path = None
+        return False, None
+
+
+def get_tesseract_installation_guide() -> str:
+    """Returnerar installationsguide för Tesseract."""
+    return (
+        "Installera Tesseract från: https://github.com/UB-Mannheim/tesseract/wiki\n"
+        "Eller ange sökväg till tesseract.exe i PDFProcessor.__init__()\n\n"
+        "För Windows:\n"
+        "1. Ladda ner installeraren från: https://github.com/UB-Mannheim/tesseract/wiki\n"
+        "2. Installera till standardplats (C:\\Program Files\\Tesseract-OCR)\n"
+        "3. Starta om applikationen"
+    )
+
+
+def get_poppler_installation_guide() -> str:
+    """Returnerar installationsguide för Poppler."""
+    return (
+        "Installera Poppler från: https://github.com/oschwartz10612/poppler-windows/releases/\n"
+        "Extrahera till C:\\poppler och lägg till C:\\poppler\\Library\\bin till PATH\n\n"
+        "För Windows:\n"
+        "1. Ladda ner poppler från: https://github.com/oschwartz10612/poppler-windows/releases/\n"
+        "2. Extrahera till C:\\poppler\n"
+        "3. Lägg till C:\\poppler\\Library\\bin till system-PATH\n"
+        "4. Starta om applikationen\n\n"
+        "Se INSTALL_POPPLER.md för detaljerade instruktioner."
+    )
+
 
 class PDFProcessor:
     """Hanterar PDF-läsning och OCR."""
@@ -37,73 +175,16 @@ class PDFProcessor:
             tesseract_cmd: Sökväg till tesseract executable (för Windows)
             poppler_path: Sökväg till Poppler bin-mapp (för Windows, t.ex. "C:\\poppler\\Library\\bin")
         """
-        # Konfigurera Tesseract
-        self.tesseract_available = False
-        if tesseract_cmd:
-            if os.path.exists(tesseract_cmd):
-                pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
-                self.tesseract_available = True
-            else:
-                logger.warning(f"Tesseract-sökväg angiven men hittades inte: {tesseract_cmd}")
-        else:
-            # Försök hitta tesseract automatiskt
-            # Windows standard path
-            possible_paths = [
-                r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-                r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-            ]
-            for path in possible_paths:
-                if os.path.exists(path):
-                    pytesseract.pytesseract.tesseract_cmd = path
-                    self.tesseract_available = True
-                    break
-        
-        # Verifiera att Tesseract fungerar
+        # Använd helper-funktioner för dependency-detektering
+        self.tesseract_available, tesseract_found_path = check_tesseract_available(tesseract_cmd)
         if not self.tesseract_available:
-            try:
-                pytesseract.get_tesseract_version()
-                self.tesseract_available = True
-            except Exception:
-                logger.warning("Tesseract OCR hittades inte. OCR-funktionalitet kommer inte att fungera.")
-                self.tesseract_available = False
+            logger.warning("Tesseract OCR hittades inte. OCR-funktionalitet kommer inte att fungera.")
+            logger.info(f"Installationsguide:\n{get_tesseract_installation_guide()}")
         
-        # Konfigurera Poppler
-        self.poppler_available = False
-        self.poppler_path = poppler_path
-        if poppler_path:
-            # Lägg till Poppler till PATH för denna session
-            poppler_bin = Path(poppler_path)
-            if poppler_bin.exists():
-                os.environ["PATH"] = str(poppler_bin) + os.pathsep + os.environ.get("PATH", "")
-                self.poppler_available = True
-            else:
-                logger.warning(f"Poppler-sökväg angiven men hittades inte: {poppler_path}")
-        else:
-            # Försök hitta Poppler automatiskt
-            possible_poppler_paths = [
-                r"C:\poppler\Library\bin",
-                r"C:\Program Files\poppler\Library\bin",
-                r"C:\Program Files (x86)\poppler\Library\bin",
-            ]
-            for path in possible_poppler_paths:
-                if os.path.exists(path):
-                    self.poppler_path = path
-                    os.environ["PATH"] = path + os.pathsep + os.environ.get("PATH", "")
-                    self.poppler_available = True
-                    break
-        
-        # Verifiera att Poppler fungerar (testa genom att försöka konvertera en test-PDF)
+        self.poppler_available, self.poppler_path = check_poppler_available(poppler_path)
         if not self.poppler_available:
-            # Kontrollera om pdf2image kan hitta poppler
-            try:
-                # Försök importera och testa
-                from pdf2image.exceptions import PDFInfoNotInstalledError
-                # Om vi kommer hit utan exception, är Poppler troligen tillgängligt via PATH
-                self.poppler_available = True
-            except Exception:
-                logger.warning("Poppler hittades inte. PDF-till-bild konvertering kommer inte att fungera.")
-                logger.info("Installera Poppler från: https://github.com/oschwartz10612/poppler-windows/releases/")
-                self.poppler_available = False
+            logger.warning("Poppler hittades inte. PDF-till-bild konvertering kommer inte att fungera.")
+            logger.info(f"Installationsguide:\n{get_poppler_installation_guide()}")
     
     def extract_text(self, pdf_path: str, use_ocr: bool = False) -> str:
         """
